@@ -23,6 +23,9 @@ from plugins.memory.hindsight import (
     RECALL_SCHEMA,
     REFLECT_SCHEMA,
     RETAIN_SCHEMA,
+    _CLIENT_REQUIREMENT,
+    _PINNED_CLIENT_VERSION,
+    _client_version_supported,
     _load_config,
     _load_simple_env,
     _build_embedded_profile_env,
@@ -1314,12 +1317,14 @@ class TestPostSetupEnvEncoding:
 
 
 class TestClientAutoUpgradeRoutesThroughLazyDeps:
-    """The initialize()-time hindsight-client auto-upgrade must go through
+    """The initialize()-time hindsight-client repair must go through
     lazy_deps.install_specs() (environment-aware, durable-target on sealed
     hosted venvs) — never a direct `uv pip install --python sys.executable`
     subprocess, which fails with EROFS/EACCES on immutable images (NS-605)."""
 
-    def _init_with_outdated_client(self, tmp_path, monkeypatch, outcome):
+    def _init_with_client_version(
+        self, tmp_path, monkeypatch, outcome, installed="0.0.1"
+    ):
         import importlib.metadata as md
         import subprocess as subprocess_mod
         import tools.lazy_deps as lazy_deps_mod
@@ -1331,8 +1336,7 @@ class TestClientAutoUpgradeRoutesThroughLazyDeps:
             "plugins.memory.hindsight.get_hermes_home", lambda: tmp_path
         )
 
-        # Simulate an installed-but-outdated client.
-        monkeypatch.setattr(md, "version", lambda name: "0.0.1")
+        monkeypatch.setattr(md, "version", lambda name: installed)
 
         calls = []
         monkeypatch.setattr(
@@ -1349,14 +1353,35 @@ class TestClientAutoUpgradeRoutesThroughLazyDeps:
         provider.initialize(session_id="s", hermes_home=str(tmp_path), platform="cli")
         return calls
 
-    def test_upgrade_uses_install_specs_not_subprocess(self, tmp_path, monkeypatch):
-        from plugins.memory.hindsight import _MIN_CLIENT_VERSION
+    def test_repair_uses_exact_spec_via_install_specs(self, tmp_path, monkeypatch):
         from tools.lazy_deps import InstallSpecsResult
 
-        calls = self._init_with_outdated_client(
+        calls = self._init_with_client_version(
             tmp_path, monkeypatch, InstallSpecsResult(ok=True)
         )
-        assert calls == [(f"hindsight-client>={_MIN_CLIENT_VERSION}",)]
+        assert calls == [(_CLIENT_REQUIREMENT,)]
+
+    def test_newer_client_is_re_pinned(self, tmp_path, monkeypatch):
+        from tools.lazy_deps import InstallSpecsResult
+
+        calls = self._init_with_client_version(
+            tmp_path,
+            monkeypatch,
+            InstallSpecsResult(ok=True),
+            installed="0.9.1",
+        )
+        assert calls == [(_CLIENT_REQUIREMENT,)]
+
+    def test_pinned_client_is_left_untouched(self, tmp_path, monkeypatch):
+        from tools.lazy_deps import InstallSpecsResult
+
+        calls = self._init_with_client_version(
+            tmp_path,
+            monkeypatch,
+            InstallSpecsResult(ok=True),
+            installed=_PINNED_CLIENT_VERSION,
+        )
+        assert calls == []
 
     def test_blocked_upgrade_is_nonfatal_and_surfaces_reason(
         self, tmp_path, monkeypatch, caplog
@@ -1365,7 +1390,7 @@ class TestClientAutoUpgradeRoutesThroughLazyDeps:
         from tools.lazy_deps import InstallSpecsResult
 
         with caplog.at_level(logging.WARNING):
-            calls = self._init_with_outdated_client(
+            calls = self._init_with_client_version(
                 tmp_path, monkeypatch,
                 InstallSpecsResult(ok=False, blocked=True,
                                    reason="runtime installs are disabled on this deployment"),
@@ -1373,3 +1398,23 @@ class TestClientAutoUpgradeRoutesThroughLazyDeps:
         assert len(calls) == 1  # attempted exactly once, init still completed
         assert any("runtime installs are disabled" in r.getMessage()
                    for r in caplog.records)
+
+
+class TestClientVersionGate:
+    def test_requirement_is_exact_pin(self):
+        assert _CLIENT_REQUIREMENT == f"hindsight-client=={_PINNED_CLIENT_VERSION}"
+
+    @pytest.mark.parametrize(
+        "installed,supported",
+        [
+            ("0.6.1", False),
+            ("0.8.4", False),
+            ("0.8.5", True),
+            ("0.8.6", False),
+            ("0.9.0", False),
+            (None, False),
+            ("not-a-version", False),
+        ],
+    )
+    def test_version_pin_membership(self, installed, supported):
+        assert _client_version_supported(installed) is supported

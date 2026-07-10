@@ -55,8 +55,11 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_API_URL = "https://api.hindsight.vectorize.io"
 _DEFAULT_LOCAL_URL = "http://localhost:8888"
-# Keep in sync with tools/lazy_deps.py ("memory.hindsight") and plugin.yaml.
-_MIN_CLIENT_VERSION = "0.8.4"
+# Keep in sync with the [hindsight] extra in pyproject.toml, tools/lazy_deps.py
+# ("memory.hindsight"), and plugin.yaml. tests/test_packaging_metadata.py
+# enforces the four-way lockstep without importing this provider.
+_PINNED_CLIENT_VERSION = "0.8.5"
+_CLIENT_REQUIREMENT = f"hindsight-client=={_PINNED_CLIENT_VERSION}"
 _DEFAULT_TIMEOUT = 120  # seconds — cloud API can take 30-40s per request
 _DEFAULT_IDLE_TIMEOUT = 300  # seconds — Hindsight embedded daemon default
 # Mirrors hindsight-integrations/openclaw — Hindsight 0.5.0 added
@@ -181,6 +184,17 @@ def _meets_minimum_version(actual: str | None, required: str) -> bool:
     try:
         from packaging.version import Version
         return Version(actual) >= Version(required)
+    except Exception:
+        return False
+
+
+def _client_version_supported(actual: str | None) -> bool:
+    """Return whether the installed client matches the reviewed exact pin."""
+    if not actual:
+        return False
+    try:
+        from packaging.version import Version
+        return Version(actual) == Version(_PINNED_CLIENT_VERSION)
     except Exception:
         return False
 
@@ -877,10 +891,12 @@ class HindsightMemoryProvider(MemoryProvider):
         env_writes: dict = {}
 
         # Step 2: Install/upgrade deps for selected mode
-        cloud_dep = f"hindsight-client>={_MIN_CLIENT_VERSION}"
+        cloud_dep = _CLIENT_REQUIREMENT
         local_dep = "hindsight-all"
         if mode == "local_embedded":
-            deps_to_install = [local_dep]
+            # hindsight-all permits a broad client range, so constrain both in
+            # the same solve rather than letting its transitive dependency win.
+            deps_to_install = [local_dep, cloud_dep]
         elif mode == "local_external":
             deps_to_install = [cloud_dep]
         else:
@@ -1451,6 +1467,49 @@ class HindsightMemoryProvider(MemoryProvider):
             return self._session_id, "append"
         return fallback_document_id, None
 
+    def _ensure_supported_client(self) -> None:
+        """Best-effort convergence on the reviewed exact client version.
+
+        Route repairs through lazy_deps so immutable hosted installations use
+        their durable dependency target instead of writing into a sealed venv.
+        """
+        try:
+            from importlib.metadata import version as pkg_version
+            installed = pkg_version("hindsight-client")
+        except Exception:
+            return
+        if _client_version_supported(installed):
+            return
+
+        logger.warning(
+            "hindsight-client %s does not match the pinned version (need %s), "
+            "attempting to reinstall...",
+            installed,
+            _CLIENT_REQUIREMENT,
+        )
+        try:
+            from tools.lazy_deps import install_specs
+            outcome = install_specs([_CLIENT_REQUIREMENT], timeout=120)
+            if outcome.ok:
+                logger.info("hindsight-client re-pinned to %s", _CLIENT_REQUIREMENT)
+            elif outcome.blocked:
+                logger.warning(
+                    "Auto-reinstall unavailable: %s. Run: uv pip install '%s'",
+                    outcome.reason,
+                    _CLIENT_REQUIREMENT,
+                )
+            else:
+                logger.warning(
+                    "Auto-reinstall failed: %s. Run: uv pip install '%s'",
+                    (outcome.stderr or "").strip() or "install error",
+                    _CLIENT_REQUIREMENT,
+                )
+        except Exception:
+            logger.exception(
+                "Auto-reinstall failed unexpectedly. Run: uv pip install '%s'",
+                _CLIENT_REQUIREMENT,
+            )
+
     def initialize(self, session_id: str, **kwargs) -> None:
         self._session_id = str(session_id or "").strip()
         self._parent_session_id = str(kwargs.get("parent_session_id", "") or "").strip()
@@ -1463,28 +1522,7 @@ class HindsightMemoryProvider(MemoryProvider):
         start_ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self._document_id = f"{self._session_id}-{start_ts}"
 
-        # Check client version and auto-upgrade if needed
-        try:
-            from importlib.metadata import version as pkg_version
-            from packaging.version import Version
-            installed = pkg_version("hindsight-client")
-            if Version(installed) < Version(_MIN_CLIENT_VERSION):
-                logger.warning("hindsight-client %s is outdated (need >=%s), attempting upgrade...",
-                               installed, _MIN_CLIENT_VERSION)
-                # Environment-aware install: sealed hosted venvs redirect to the
-                # durable data-volume target instead of /opt/hermes (NS-605).
-                from tools.lazy_deps import install_specs
-                outcome = install_specs([f"hindsight-client>={_MIN_CLIENT_VERSION}"], timeout=120)
-                if outcome.ok:
-                    logger.info("hindsight-client upgraded to >=%s", _MIN_CLIENT_VERSION)
-                elif outcome.blocked:
-                    logger.warning("Auto-upgrade unavailable: %s. Run: uv pip install 'hindsight-client>=%s'",
-                                   outcome.reason, _MIN_CLIENT_VERSION)
-                else:
-                    logger.warning("Auto-upgrade failed: %s. Run: uv pip install 'hindsight-client>=%s'",
-                                   (outcome.stderr or "").strip() or "install error", _MIN_CLIENT_VERSION)
-        except Exception:
-            pass  # packaging not available or other issue — proceed anyway
+        self._ensure_supported_client()
 
         self._config = _load_config()
         self._platform = str(kwargs.get("platform") or "").strip()
