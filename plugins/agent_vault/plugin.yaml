@@ -1,0 +1,4 @@
+name: agent_vault
+version: 0.1.0
+description: "Route Hermes network clients and tool subprocesses through the active profile's Agent Vault proxy environment."
+author: Scott
