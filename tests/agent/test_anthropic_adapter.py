@@ -46,7 +46,19 @@ class TestIsOAuthToken:
 
 
 class TestBuildAnthropicClient:
+    def test_uses_profile_aware_http_client(self):
+        profile_http_client = MagicMock()
+        with (
+            patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk,
+            patch(
+                "agent.process_bootstrap.build_keepalive_http_client",
+                return_value=profile_http_client,
+            ) as mock_http_client_builder,
+        ):
+            build_anthropic_client("sk-ant-api03-something")
 
+        mock_http_client_builder.assert_called_once_with("")
+        assert mock_sdk.Anthropic.call_args.kwargs["http_client"] is profile_http_client
 
     def test_api_key_uses_api_key(self):
         with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
