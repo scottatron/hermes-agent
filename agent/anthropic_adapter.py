@@ -738,7 +738,12 @@ def _build_anthropic_client_with_bearer_hook(
         import re as _re
         normalized_base_url = _re.sub(r"/v1/?$", "", normalized_base_url.rstrip("/"))
 
-    http_client = build_bearer_http_client(token_provider, timeout=timeout_obj)
+    from agent.process_bootstrap import _get_proxy_for_base_url
+
+    proxy = _get_proxy_for_base_url(normalized_base_url or base_url)
+    http_client = build_bearer_http_client(
+        token_provider, timeout=timeout_obj, proxy=proxy,
+    )
 
     kwargs = {
         "timeout": timeout_obj,
@@ -841,6 +846,11 @@ def build_anthropic_client(
         # refill for minutes. (#26293)
         "max_retries": 0,
     }
+    from agent.process_bootstrap import build_keepalive_http_client
+
+    http_client = build_keepalive_http_client(normalized_base_url or base_url or "")
+    if http_client is not None:
+        kwargs["http_client"] = http_client
     if normalized_base_url:
         # Azure Anthropic endpoints require an ``api-version`` query parameter.
         # Pass it via default_query so the SDK appends it to every request URL

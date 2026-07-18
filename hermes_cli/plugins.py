@@ -368,6 +368,13 @@ class LoadedPlugin:
 class PluginContext:
     """Facade given to plugins so they can register tools and hooks."""
 
+    def register_outbound_routing_provider(self, provider: Callable[[], Mapping[str, str]]) -> None:
+        """Register a context-aware proxy/CA resolver for network subprocesses."""
+        from agent.outbound_routing import register_outbound_routing_provider
+
+        register_outbound_routing_provider(provider)
+        logger.info("Plugin '%s' registered an outbound routing provider", self.manifest.name)
+
     def __init__(self, manifest: PluginManifest, manager: "PluginManager"):
         self.manifest = manifest
         self._manager = manager
