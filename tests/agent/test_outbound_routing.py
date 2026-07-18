@@ -29,12 +29,14 @@ def test_provider_is_context_local_and_filters_non_routing_values():
     register_outbound_routing_provider(resolver)
     token = set_secret_scope({
         "HTTPS_PROXY": "http://squirl-proxy:14322",
+        "SLACK_PROXY": "http://squirl-slack-proxy:14322",
         "SSL_CERT_FILE": "/tmp/squirl-ca.pem",
         "AGENT_VAULT_TOKEN": "must-not-leak",
     })
     try:
         assert get_outbound_routing_env() == {
             "HTTPS_PROXY": "http://squirl-proxy:14322",
+            "SLACK_PROXY": "http://squirl-slack-proxy:14322",
             "SSL_CERT_FILE": "/tmp/squirl-ca.pem",
         }
     finally:
