@@ -4625,6 +4625,13 @@ OPTIONAL_ENV_VARS = {
         "password": True,
         "category": "messaging",
     },
+    "SLACK_PROXY": {
+        "description": "Proxy URL for Slack API and Socket Mode connections (overrides HTTPS_PROXY). Supports http:// and https://",
+        "prompt": "Slack proxy URL (optional)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
     "SLACK_ALLOWED_USERS": {
         "description": "Comma-separated Slack member IDs allowed to use Hermes, e.g. U01ABC2DEF3. Without this, Slack may connect but deny messages by default.",
         "prompt": "Allowed Slack member IDs",
