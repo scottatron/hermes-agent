@@ -110,6 +110,52 @@ class TestGetProxyUrl:
 
 
 class TestResolveProxyUrl:
+    def test_profile_scope_overrides_process_proxy_for_platform(self, monkeypatch):
+        from agent.outbound_routing import (
+            clear_outbound_routing_provider,
+            register_outbound_routing_provider,
+        )
+        from agent.secret_scope import (
+            current_secret_scope,
+            reset_secret_scope,
+            set_secret_scope,
+        )
+
+        monkeypatch.setenv("HTTPS_PROXY", "http://default-vault:14322")
+        register_outbound_routing_provider(lambda: current_secret_scope() or {})
+        token = set_secret_scope({
+            "HTTPS_PROXY": "http://profile-general-vault:14322",
+            "SLACK_PROXY": "http://profile-slack-vault:14322",
+        })
+        try:
+            assert resolve_proxy_url(
+                "SLACK_PROXY", target_hosts="slack.com"
+            ) == "http://profile-slack-vault:14322"
+        finally:
+            reset_secret_scope(token)
+            clear_outbound_routing_provider()
+
+    def test_profile_scope_general_proxy_overrides_process_proxy(self, monkeypatch):
+        from agent.outbound_routing import (
+            clear_outbound_routing_provider,
+            register_outbound_routing_provider,
+        )
+        from agent.secret_scope import (
+            current_secret_scope,
+            reset_secret_scope,
+            set_secret_scope,
+        )
+
+        monkeypatch.setenv("HTTPS_PROXY", "http://default-vault:14322")
+        register_outbound_routing_provider(lambda: current_secret_scope() or {})
+        token = set_secret_scope({
+            "HTTPS_PROXY": "http://profile-general-vault:14322",
+        })
+        try:
+            assert resolve_proxy_url() == "http://profile-general-vault:14322"
+        finally:
+            reset_secret_scope(token)
+            clear_outbound_routing_provider()
 
     def test_no_proxy_bypasses_matching_host(self, monkeypatch):
         for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",

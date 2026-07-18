@@ -829,6 +829,17 @@ class TestSlackSocketWatchdog:
 
 
 class TestSlackProxyBehavior:
+    def test_resolve_slack_proxy_url_prefers_slack_specific_proxy(self):
+        with patch.object(
+            _slack_mod,
+            "resolve_proxy_url",
+            return_value="http://slack-vault:14322",
+        ) as resolve:
+            assert _slack_mod._resolve_slack_proxy_url() == "http://slack-vault:14322"
+
+        resolve.assert_called_once_with(
+            "SLACK_PROXY", target_hosts=_slack_mod._SLACK_PROXY_HOSTS
+        )
 
 
     def test_resolve_slack_proxy_url_checks_all_slack_hosts(self):
