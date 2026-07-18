@@ -726,7 +726,9 @@ _SLACK_PROXY_HOSTS = (
 
 def _resolve_slack_proxy_url() -> Optional[str]:
     """Resolve a proxy URL that Slack SDK clients can safely use."""
-    proxy_url = resolve_proxy_url()
+    proxy_url = resolve_proxy_url(
+        "SLACK_PROXY", target_hosts=_SLACK_PROXY_HOSTS,
+    )
     if not proxy_url:
         return None
 

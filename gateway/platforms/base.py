@@ -344,9 +344,12 @@ def _split_host_port(value: str) -> tuple[str, int | None]:
 
 
 def _no_proxy_entries() -> list[str]:
+    from agent.outbound_routing import get_outbound_routing_env
+
+    routing = get_outbound_routing_env()
     entries: list[str] = []
     for key in ("NO_PROXY", "no_proxy"):
-        raw = os.environ.get(key, "")
+        raw = routing.get(key, os.environ.get(key, ""))
         entries.extend(part.strip() for part in raw.split(",") if part.strip())
     return entries
 
@@ -429,15 +432,18 @@ def resolve_proxy_url(
     Returns *None* if no proxy is found, or if NO_PROXY/no_proxy matches one
     of ``target_hosts``.
     """
+    from agent.outbound_routing import get_outbound_routing_env
+
+    routing = get_outbound_routing_env()
     if platform_env_var:
-        value = (os.environ.get(platform_env_var) or "").strip()
+        value = (routing.get(platform_env_var, os.environ.get(platform_env_var)) or "").strip()
         if value:
             if should_bypass_proxy(target_hosts):
                 return None
             return normalize_proxy_url(value)
     for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
                 "https_proxy", "http_proxy", "all_proxy"):
-        value = (os.environ.get(key) or "").strip()
+        value = (routing.get(key, os.environ.get(key)) or "").strip()
         if value:
             if should_bypass_proxy(target_hosts):
                 return None
