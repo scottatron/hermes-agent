@@ -638,6 +638,9 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     # spawn path (process_registry.spawn_local builds env via this function).
     _inject_session_context_env(sanitized)
 
+    from agent.outbound_routing import apply_outbound_routing_env
+    apply_outbound_routing_env(sanitized)
+
     # Filter PYTHONPATH before removing VIRTUAL_ENV: legacy Windows launchers
     # can run the gateway under a base interpreter while VIRTUAL_ENV identifies
     # the separate Hermes runtime venv.  The filter validates that relationship
@@ -750,6 +753,8 @@ def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str
     ``os.environ`` into the returned dict.
     """
     env = os.environ.copy()
+    from agent.outbound_routing import apply_outbound_routing_env
+    apply_outbound_routing_env(env)
 
     # Tier 1 — always strip.
     for key in _ALWAYS_STRIP_KEYS:

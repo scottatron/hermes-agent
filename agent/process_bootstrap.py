@@ -348,9 +348,12 @@ def _get_proxy_from_env() -> Optional[str]:
     Checks HTTPS_PROXY, HTTP_PROXY, ALL_PROXY (and lowercase variants) in order.
     Returns the first valid proxy URL found, or None if no proxy is configured.
     """
+    from agent.outbound_routing import get_outbound_routing_env
+
+    routing = get_outbound_routing_env()
     for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
                 "https_proxy", "http_proxy", "all_proxy"):
-        value = os.environ.get(key, "").strip()
+        value = routing.get(key, os.environ.get(key, "")).strip()
         if value:
             return normalize_proxy_url(value)
     return None
@@ -367,7 +370,15 @@ def _get_proxy_for_base_url(base_url: Optional[str]) -> Optional[str]:
         return proxy
 
     try:
-        if urllib.request.proxy_bypass_environment(host):
+        from agent.outbound_routing import get_outbound_routing_env
+
+        routing = get_outbound_routing_env()
+        proxies = {
+            key.lower().removesuffix("_proxy"): value
+            for key, value in routing.items()
+            if key.lower() in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}
+        }
+        if urllib.request.proxy_bypass_environment(host, proxies or None):
             return None
     except Exception:
         pass
