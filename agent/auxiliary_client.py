@@ -5199,7 +5199,13 @@ def _client_cache_key(
     # share an entry, and the second builder's _store_cached_client would close the first's client.
     model_key = model or runtime.get("model", "")
     api_key_key = _runtime_cache_discriminator("api_key", api_key or "")
-    return (provider, async_mode, base_url or "", api_key_key, api_mode or "", runtime_key, is_vision, task_key, pool_hint, model_key)
+    from agent.outbound_routing import outbound_routing_cache_key
+
+    routing_key = outbound_routing_cache_key()
+    return (
+        provider, async_mode, base_url or "", api_key_key, api_mode or "",
+        runtime_key, is_vision, task_key, pool_hint, model_key, routing_key,
+    )
 
 
 def _current_event_loop() -> Any:

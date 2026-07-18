@@ -2676,6 +2676,9 @@ OPTIONAL_ENV_VARS = {
         "https://api.slack.com/apps",
         help=("In Slack, open your profile, choose More or the three-dot menu, then Copy member "
         "ID. Add multiple IDs comma-separated.")),
+    "SLACK_PROXY": _msg(
+        "Proxy URL for Slack API and Socket Mode connections (overrides HTTPS_PROXY). "
+        "Supports http:// and https://", "Slack proxy URL (optional)"),
     "MATTERMOST_URL": _msg("Mattermost server URL (e.g. https://mm.example.com)",
         "Mattermost server URL", "https://mattermost.com/deploy/"),
     "MATTERMOST_TOKEN": _msg("Mattermost bot token or personal access token",

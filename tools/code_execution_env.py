@@ -106,6 +106,8 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
         for key in (DELEGATED_CHILD_ENV_MARKER, "HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD"):
             if key in scoped:
                 scrubbed[key] = scoped[key]
+    from agent.outbound_routing import apply_outbound_routing_env
+    apply_outbound_routing_env(scrubbed)
     return delegated_child_subprocess_env(scrubbed)
 
 

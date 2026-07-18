@@ -336,7 +336,11 @@ def _build_anthropic_client_with_bearer_hook(
     normalize_proxy_env_vars()
     from agent.azure_identity_adapter import build_bearer_http_client
     normalized_base_url, kwargs = _base_client_kwargs(base_url, timeout)
-    kwargs["http_client"] = build_bearer_http_client(token_provider, timeout=kwargs["timeout"])
+    from agent.process_bootstrap import _get_proxy_for_base_url
+    kwargs["http_client"] = build_bearer_http_client(
+        token_provider, timeout=kwargs["timeout"],
+        proxy=_get_proxy_for_base_url(normalized_base_url or base_url),
+    )
     kwargs["auth_token"] = "entra-id-bearer-via-http-hook"
     headers = _beta_header(_common_betas_for_base_url(normalized_base_url, drop_context_1m_beta=drop_context_1m_beta))
     return _new_sdk_client(sdk, kwargs, headers)
@@ -403,6 +407,10 @@ def build_anthropic_client(api_key, base_url: str = None, timeout: float = None,
         # get these from profile.default_headers, but this route never sees the profile.
         for k, v in _attribution_headers().items():
             headers.setdefault(k, v)
+    from agent.process_bootstrap import build_keepalive_http_client
+    http_client = build_keepalive_http_client(normalized_base_url or base_url or "")
+    if http_client is not None:
+        kwargs["http_client"] = http_client
     return _new_sdk_client(sdk, kwargs, headers)
 
 

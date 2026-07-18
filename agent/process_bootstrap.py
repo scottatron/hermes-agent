@@ -288,8 +288,11 @@ class _SafeWriter:
 
 def _get_proxy_from_env() -> Optional[str]:
     """First configured proxy URL from HTTPS_PROXY / HTTP_PROXY / ALL_PROXY (any case), or None."""
+    from agent.outbound_routing import get_outbound_routing_env
+    routing = get_outbound_routing_env()
     keys = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
-    return next((normalize_proxy_url(v) for k in keys if (v := os.environ.get(k, "").strip())), None)
+    return next((normalize_proxy_url(v) for k in keys
+                 if (v := routing.get(k, os.environ.get(k, "")).strip())), None)
 
 
 def _get_proxy_for_base_url(base_url: Optional[str]) -> Optional[str]:
@@ -297,7 +300,11 @@ def _get_proxy_for_base_url(base_url: Optional[str]) -> Optional[str]:
     proxy = _get_proxy_from_env()
     host = base_url_hostname(base_url) if proxy and base_url else ""
     try:
-        return None if host and urllib.request.proxy_bypass_environment(host) else proxy
+        from agent.outbound_routing import get_outbound_routing_env
+        routing = get_outbound_routing_env()
+        proxies = {key.lower().removesuffix("_proxy"): value for key, value in routing.items()
+                   if key.lower() in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}}
+        return None if host and urllib.request.proxy_bypass_environment(host, proxies or None) else proxy
     except Exception:
         return proxy
 

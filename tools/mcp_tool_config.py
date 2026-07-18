@@ -108,6 +108,8 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
             env[key] = os.environ[key]
     if user_env:
         env.update(user_env)
+    from agent.outbound_routing import apply_outbound_routing_env
+    apply_outbound_routing_env(env)
     from agent.delegation_context import delegated_child_subprocess_env
     return delegated_child_subprocess_env(env)
 

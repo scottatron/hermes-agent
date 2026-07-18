@@ -284,9 +284,11 @@ def _split_host_port(value: str) -> tuple[str, int | None]:
 
 
 def _no_proxy_entries() -> list[str]:
+    from agent.outbound_routing import get_outbound_routing_env
+    routing = get_outbound_routing_env()
     return [
         part.strip() for key in ("NO_PROXY", "no_proxy")
-        for part in os.environ.get(key, "").split(",") if part.strip()]
+        for part in routing.get(key, os.environ.get(key, "")).split(",") if part.strip()]
 
 
 def _ip_or_none(value: str, parse=ipaddress.ip_address):
@@ -335,12 +337,15 @@ def resolve_proxy_url(
     """Proxy URL: *platform_env_var* (e.g. ``DISCORD_PROXY``) first, then HTTPS_PROXY /
     HTTP_PROXY / ALL_PROXY (any case), then the macOS system proxy — the latter two only when
     ``gateway.trust_env`` is true. None when nothing is found or NO_PROXY matches a target."""
-    value = (os.environ.get(platform_env_var) or "").strip() if platform_env_var else ""
+    from agent.outbound_routing import get_outbound_routing_env
+    routing = get_outbound_routing_env()
+    value = (routing.get(platform_env_var, os.environ.get(platform_env_var)) or "").strip() if platform_env_var else ""
     if not value:
         if not gateway_trust_env():  # only the explicit per-platform var is honored
             return None
         keys = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
-        value = next((v for k in keys if (v := (os.environ.get(k) or "").strip())), "")
+        value = next((v for k in keys
+                      if (v := (routing.get(k, os.environ.get(k)) or "").strip())), "")
     proxy = normalize_proxy_url(value or _detect_macos_system_proxy())
     return None if proxy and should_bypass_proxy(target_hosts) else proxy
 
