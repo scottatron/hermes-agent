@@ -38,8 +38,9 @@ from .embedded import (
     _export_port_health_grace_timeout, _load_simple_env, _local_runtime_hint, _materialize_embedded_profile_env,
 )
 from .settings import (
-    _DEFAULT_API_URL, _DEFAULT_IDLE_TIMEOUT, _DEFAULT_LOCAL_URL, _DEFAULT_RETAIN_SOURCE,
-    _DEFAULT_TIMEOUT, _HINDSIGHT_GLYPH, _MIN_CLIENT_VERSION, _MIN_VERSION_FOR_UPDATE_MODE_APPEND,
+    _CLIENT_REQUIREMENT, _DEFAULT_API_URL, _DEFAULT_IDLE_TIMEOUT, _DEFAULT_LOCAL_URL,
+    _DEFAULT_RETAIN_SOURCE, _DEFAULT_TIMEOUT, _HINDSIGHT_GLYPH,
+    _MIN_VERSION_FOR_UPDATE_MODE_APPEND, _PINNED_CLIENT_VERSION,
     _PROVIDER_DEFAULT_MODELS, _VALID_BUDGETS, _daemon_llm_provider,
     _normalize_observation_scopes, _normalize_retain_tags, _parse_int_setting,
     _resolve_bank_id_template,
@@ -66,28 +67,46 @@ def _cloud_api_key(config: dict) -> str:
     return config.get("apiKey") or config.get("api_key") or get_secret("HINDSIGHT_API_KEY", "")
 
 
-def _maybe_upgrade_client() -> None:
-    """Auto-upgrade an outdated hindsight-client via the environment-aware lazy_deps
-    installer (sealed hosted venvs redirect to the durable target)."""
+def _client_version_supported(actual: str | None) -> bool:
+    """Return whether the installed client matches the reviewed exact pin."""
+    if not actual:
+        return False
+    try:
+        from packaging.version import Version
+        return Version(actual) == Version(_PINNED_CLIENT_VERSION)
+    except Exception:
+        return False
+
+
+def _ensure_supported_client() -> None:
+    """Best-effort convergence on the reviewed exact client version.
+
+    Route repairs through lazy_deps so immutable hosted installations use their
+    durable dependency target instead of writing into a sealed venv.
+    """
     try:
         from importlib.metadata import version as pkg_version
-        from packaging.version import Version
         installed = pkg_version("hindsight-client")
-        if Version(installed) < Version(_MIN_CLIENT_VERSION):
-            logger.warning("hindsight-client %s is outdated (need >=%s), attempting upgrade...",
-                           installed, _MIN_CLIENT_VERSION)
-            from tools.lazy_deps import install_specs
-            outcome = install_specs([f"hindsight-client>={_MIN_CLIENT_VERSION}"], timeout=120)
-            if outcome.ok:
-                logger.info("hindsight-client upgraded to >=%s", _MIN_CLIENT_VERSION)
-            elif outcome.blocked:
-                logger.warning("Auto-upgrade unavailable: %s. Run: uv pip install 'hindsight-client>=%s'",
-                               outcome.reason, _MIN_CLIENT_VERSION)
-            else:
-                logger.warning("Auto-upgrade failed: %s. Run: uv pip install 'hindsight-client>=%s'",
-                               (outcome.stderr or "").strip() or "install error", _MIN_CLIENT_VERSION)
     except Exception:
-        pass  # packaging not available or other issue — proceed anyway
+        return
+    if _client_version_supported(installed):
+        return
+    logger.warning("hindsight-client %s does not match the pinned version (need %s), "
+                   "attempting to reinstall...", installed, _CLIENT_REQUIREMENT)
+    try:
+        from tools.lazy_deps import install_specs
+        outcome = install_specs([_CLIENT_REQUIREMENT], timeout=120)
+        if outcome.ok:
+            logger.info("hindsight-client re-pinned to %s", _CLIENT_REQUIREMENT)
+        elif outcome.blocked:
+            logger.warning("Auto-reinstall unavailable: %s. Run: uv pip install '%s'",
+                           outcome.reason, _CLIENT_REQUIREMENT)
+        else:
+            logger.warning("Auto-reinstall failed: %s. Run: uv pip install '%s'",
+                           (outcome.stderr or "").strip() or "install error", _CLIENT_REQUIREMENT)
+    except Exception:
+        logger.exception("Auto-reinstall failed unexpectedly. Run: uv pip install '%s'",
+                         _CLIENT_REQUIREMENT)
 
 
 # update_mode='append' capability (Hindsight >= 0.5.0), cached per API URL per
@@ -659,7 +678,7 @@ class HindsightMemoryProvider(MemoryProvider):
             self._status_callback = kwargs["status_callback"]
         # session_id stays in tags so processes for one session remain filterable together.
         self._document_id = _mint_document_id(self._session_id)
-        _maybe_upgrade_client()
+        _ensure_supported_client()
 
         self._config = cfg = _load_config()
         for name in _SESSION_KWARGS:
