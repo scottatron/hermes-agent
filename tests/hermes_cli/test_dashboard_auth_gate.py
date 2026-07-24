@@ -203,3 +203,103 @@ def test_start_server_gate_with_provider_proceeds_and_sets_proxy_headers(monkeyp
         clear_providers()
 
 
+def _restore_app_state_after_test(monkeypatch, *names):
+    """Have monkeypatch restore app.state attributes after start_server mutates them."""
+    for name in names:
+        monkeypatch.setattr(
+            web_server.app.state,
+            name,
+            getattr(web_server.app.state, name, None),
+            raising=False,
+        )
+
+
+def test_start_server_loopback_public_url_enables_gate(monkeypatch):
+    """A declared external URL turns a loopback reverse proxy into gated mode."""
+    from hermes_cli.dashboard_auth import clear_providers, register_provider
+    from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
+
+    monkeypatch.setenv(
+        "HERMES_DASHBOARD_PUBLIC_URL",
+        "https://dashboard.example.test:9443",
+    )
+    clear_providers()
+    register_provider(StubAuthProvider())
+    captured = _stub_uvicorn_run(monkeypatch)
+    _restore_app_state_after_test(
+        monkeypatch,
+        "auth_required",
+        "bound_host",
+        "bound_port",
+        "trusted_public_hosts",
+    )
+    try:
+        web_server.start_server(
+            host="127.0.0.1", port=9119,
+            open_browser=False, allow_public=False,
+        )
+        assert web_server.app.state.auth_required is True
+        assert web_server.app.state.trusted_public_hosts == frozenset(
+            {"dashboard.example.test"}
+        )
+        assert captured["kwargs"].get("host") == "127.0.0.1"
+        assert captured["kwargs"].get("proxy_headers") is True
+    finally:
+        clear_providers()
+
+
+def test_start_server_loopback_public_url_without_provider_fails_closed(monkeypatch):
+    """Trusting an external Host must never expose the loopback token mode."""
+    from hermes_cli.dashboard_auth import clear_providers
+
+    monkeypatch.setenv(
+        "HERMES_DASHBOARD_PUBLIC_URL",
+        "https://dashboard.example.test:9443",
+    )
+    clear_providers()
+    _stub_uvicorn_run(monkeypatch)
+    _restore_app_state_after_test(
+        monkeypatch,
+        "auth_required",
+        "bound_host",
+        "bound_port",
+        "trusted_public_hosts",
+    )
+
+    with pytest.raises(SystemExit, match=r"no auth providers"):
+        web_server.start_server(
+            host="127.0.0.1", port=9119,
+            open_browser=False, allow_public=False,
+        )
+    assert web_server.app.state.auth_required is True
+
+
+def test_start_server_loopback_public_url_stays_local_when_hostname_is_local(
+    monkeypatch,
+):
+    """A loopback canonical URL preserves the existing local token mode."""
+    from hermes_cli.dashboard_auth import clear_providers
+
+    monkeypatch.setenv(
+        "HERMES_DASHBOARD_PUBLIC_URL",
+        "http://localhost:9119",
+    )
+    clear_providers()
+    captured = _stub_uvicorn_run(monkeypatch)
+    _restore_app_state_after_test(
+        monkeypatch,
+        "auth_required",
+        "bound_host",
+        "bound_port",
+        "trusted_public_hosts",
+    )
+
+    web_server.start_server(
+        host="127.0.0.1", port=9119,
+        open_browser=False, allow_public=False,
+    )
+    assert web_server.app.state.auth_required is False
+    assert web_server.app.state.trusted_public_hosts == frozenset({"localhost"})
+    assert captured["kwargs"].get("proxy_headers") is False
+
+
