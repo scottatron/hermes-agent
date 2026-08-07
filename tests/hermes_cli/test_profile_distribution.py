@@ -311,6 +311,61 @@ class TestInstall:
         # Unrelated top-level entries stay out too
         assert not (plan.target_dir / "mcp.json").exists()
 
+    def test_force_install_replaces_owned_directory_symlink(self, profile_env):
+        """An owned directory may replace a live plugin-backed skill symlink."""
+        mf = DistributionManifest(
+            name="linked_skill",
+            version="0.1.0",
+            distribution_owned=["skills/demo"],
+        )
+        staged = _make_staging_dir(profile_env, "linked_skill", manifest=mf)
+
+        from hermes_cli.profiles import get_profile_dir
+        target = get_profile_dir("linked_skill")
+        linked_source = profile_env / "plugin-skill"
+        linked_source.mkdir()
+        (linked_source / "sentinel.txt").write_text("keep me\n")
+        (target / "skills").mkdir(parents=True)
+        try:
+            (target / "skills" / "demo").symlink_to(
+                linked_source, target_is_directory=True
+            )
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable in test environment: {exc}")
+
+        plan = install_distribution(str(staged), name="linked_skill", force=True)
+
+        installed_skill = plan.target_dir / "skills" / "demo"
+        assert installed_skill.is_dir()
+        assert not installed_skill.is_symlink()
+        assert (installed_skill / "SKILL.md").exists()
+        assert (linked_source / "sentinel.txt").read_text() == "keep me\n"
+
+    def test_force_install_unlinks_owned_file_symlink_without_overwriting_target(
+        self, profile_env
+    ):
+        """Replacing an owned file must not follow a live symlink outside the profile."""
+        mf = DistributionManifest(
+            name="linked_file",
+            version="0.1.0",
+            distribution_owned=["SOUL.md"],
+        )
+        staged = _make_staging_dir(profile_env, "linked_file", manifest=mf)
+
+        from hermes_cli.profiles import get_profile_dir
+        target = get_profile_dir("linked_file")
+        target.mkdir(parents=True)
+        linked_source = profile_env / "external-soul.md"
+        linked_source.write_text("keep me\n")
+        _symlink_file_or_skip(target / "SOUL.md", linked_source)
+
+        plan = install_distribution(str(staged), name="linked_file", force=True)
+
+        installed_soul = plan.target_dir / "SOUL.md"
+        assert not installed_soul.is_symlink()
+        assert installed_soul.read_text() == "I am Source.\n"
+        assert linked_source.read_text() == "keep me\n"
+
     def test_update_respects_distribution_owned_allowlist(self, profile_env):
         """Update must only copy paths listed in distribution_owned."""
         # 1. Install with full default distribution_owned

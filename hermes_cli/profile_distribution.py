@@ -581,10 +581,16 @@ def _copy_dist_payload(
     """
     target.mkdir(parents=True, exist_ok=True)
 
+    def _remove_destination(dest: Path) -> None:
+        """Remove an existing destination without following symlinks."""
+        if dest.is_symlink() or dest.is_file():
+            dest.unlink()
+        elif dest.is_dir():
+            shutil.rmtree(dest)
+
     def _copy_entry(entry: Path, dest: Path) -> None:
         if entry.is_dir():
-            if dest.exists():
-                shutil.rmtree(dest)
+            _remove_destination(dest)
             staged_resolved = staged.resolve()
             shutil.copytree(
                 entry,
@@ -596,6 +602,7 @@ def _copy_dist_payload(
                 ),
             )
         else:
+            _remove_destination(dest)
             shutil.copy2(entry, dest)
 
     explicit_owned = [p.strip().strip("/") for p in manifest.distribution_owned]
