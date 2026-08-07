@@ -368,6 +368,13 @@ def _copy_dist_payload(staged: Path, target: Path, manifest: DistributionManifes
         # Only the staged root's direct children are filtered.
         return [n for n in names if n in USER_OWNED_EXCLUDE] if Path(d).resolve() == staged_resolved else []
 
+    def _remove_destination(dest: Path) -> None:
+        """Remove an existing destination without following symlinks."""
+        if dest.is_symlink() or dest.is_file():
+            dest.unlink()
+        elif dest.is_dir():
+            shutil.rmtree(dest)
+
     for src, rel_parts in _owned_entries(staged, manifest):
         if len(rel_parts) == 1:
             name = rel_parts[0]
@@ -379,10 +386,10 @@ def _copy_dist_payload(staged: Path, target: Path, manifest: DistributionManifes
         dest = target.joinpath(*rel_parts)
         dest.parent.mkdir(parents=True, exist_ok=True)
         if src.is_dir():
-            if dest.exists():
-                shutil.rmtree(dest)
+            _remove_destination(dest)
             shutil.copytree(src, dest, ignore=_ignore_user_owned)
         else:
+            _remove_destination(dest)
             shutil.copy2(src, dest)
 
     # Emit .env.EXAMPLE from manifest if the staged tree didn't ship one
