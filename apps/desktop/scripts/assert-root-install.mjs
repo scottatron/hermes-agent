@@ -1,12 +1,13 @@
-import { accessSync, readFileSync } from "fs"
+import { readFileSync } from "fs"
 import { createRequire } from "module"
 import { resolve, join } from "path"
 
 const app = resolve(import.meta.dirname, "..")
 const root = resolve(app, "..", "..")
+const require = createRequire(import.meta.url)
 
 try {
-  accessSync(join(root, "node_modules", "vite", "package.json"))
+  require.resolve("vite/package.json")
 } catch {
   console.error(`Run from repo root: cd ${root} && npm ci`)
   process.exit(1)

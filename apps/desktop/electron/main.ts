@@ -803,8 +803,11 @@ function pathWithHermesManagedNode(...entries) {
 // install.ps1 / install.sh use, so a desktop-only user and a CLI-only user end
 // up with identical layouts and can share one install.
 const ACTIVE_HERMES_ROOT = path.join(HERMES_HOME, 'hermes-agent')
-// VENV_ROOT — venv lives inside the repo, exactly like install.ps1 does it.
-const VENV_ROOT = path.join(ACTIVE_HERMES_ROOT, 'venv')
+// VENV_ROOT — Hermes installs traditionally use `venv/`, while uv-managed
+// developer checkouts commonly use `.venv/`. Resolve the existing interpreter
+// once so the backend, environment overlay, health probes, and uninstall path
+// all agree on the same runtime.
+const VENV_ROOT = resolveHermesVenvRoot(ACTIVE_HERMES_ROOT)
 // BOOTSTRAP_COMPLETE_MARKER — written by the first-launch bootstrap runner
 // (Phase 1D) after install.ps1 has completed all stages and the user has
 // finished initial configuration. Presence of this marker means the install
@@ -2610,6 +2613,23 @@ function getVenvPython(venvRoot) {
 // .venv 3.12 python with venv/lib/python3.11/site-packages makes the backend
 // die on its first native import (pydantic_core) before the gateway binds —
 // the renderer then reports "Gateway offline" on every profile.
+// resolveHermesVenvRoot — Hermes installs traditionally use `venv/`, while
+// uv-managed developer checkouts commonly use `.venv/`. Probe for an existing
+// interpreter so every consumer agrees on one runtime.
+function resolveHermesVenvRoot(root) {
+  for (const name of ['venv', '.venv']) {
+    const candidate = path.join(root, name)
+
+    if (fileExists(getVenvPython(candidate))) {
+      return candidate
+    }
+  }
+
+  // Keep the managed-install default stable when the runtime has not been
+  // bootstrapped yet; the installer creates `<root>/venv` there.
+  return path.join(root, 'venv')
+}
+
 function venvRootForPython(python: string, root: string) {
   const parent = path.dirname(python)
   const binName = path.basename(parent).toLowerCase()
