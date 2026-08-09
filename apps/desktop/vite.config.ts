@@ -44,6 +44,13 @@ const emojibaseDir =
   real(path.resolve(__dirname, 'node_modules/emojibase-data')) ??
   real(path.resolve(__dirname, '../../node_modules/emojibase-data'))
 
+const reactDir =
+  real(path.resolve(__dirname, 'node_modules/react')) ??
+  real(path.resolve(__dirname, '../../node_modules/react'))
+const reactDomDir =
+  real(path.resolve(__dirname, 'node_modules/react-dom')) ??
+  real(path.resolve(__dirname, '../../node_modules/react-dom'))
+
 const EMOJIBASE_PATH = /^[a-z-]+\/(data|messages|shortcodes\/emojibase)\.json$/
 
 const emojibaseAssets = () => ({
@@ -147,10 +154,10 @@ export default defineConfig(({ command }) => ({
       '@hermes/plugin-sdk': path.resolve(__dirname, './src/sdk/index.ts'),
       '@hermes/shared/billing': path.resolve(__dirname, '../shared/src/billing-types.ts'),
       '@hermes/shared': path.resolve(__dirname, '../shared/src'),
-      react: path.resolve(__dirname, '../../node_modules/react'),
-      'react-dom': path.resolve(__dirname, '../../node_modules/react-dom'),
-      'react/jsx-dev-runtime': path.resolve(__dirname, '../../node_modules/react/jsx-dev-runtime.js'),
-      'react/jsx-runtime': path.resolve(__dirname, '../../node_modules/react/jsx-runtime.js')
+      react: reactDir!,
+      'react-dom': reactDomDir!,
+      'react/jsx-dev-runtime': path.join(reactDir!, 'jsx-dev-runtime.js'),
+      'react/jsx-runtime': path.join(reactDir!, 'jsx-runtime.js')
     },
     dedupe: ['react', 'react-dom']
   },
