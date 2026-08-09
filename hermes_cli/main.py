@@ -1890,6 +1890,101 @@ def _workspace_root(dir: Path) -> Path:
     return dir
 
 
+def _aube_state_is_current(project_root: Path) -> bool:
+    """Return whether an aube-managed ``node_modules`` tree is current.
+
+    aube deliberately does not write npm's hidden ``.package-lock.json``.
+    Its equivalent freshness record is ``node_modules/.aube-state``.  We use
+    the recorded package-manifest metadata here rather than invoking a package
+    manager during every TUI launch.  The lockfile mtime check catches the
+    normal checkout/update case; package metadata catches dependency and
+    workspace manifest edits.
+
+    This is intentionally a best-effort probe.  If the state record is
+    incomplete or unreadable, callers fall back to their normal install path.
+    """
+    state_dir = project_root / "node_modules" / ".aube-state"
+    state_file = state_dir / "state.json"
+    fresh_file = state_dir / "fresh.json"
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            return False
+        manifest_meta = state.get("package_json_meta")
+        if not isinstance(manifest_meta, dict) or not manifest_meta:
+            return False
+
+        lock_name = state.get("lockfile_snapshot_name")
+        if isinstance(lock_name, str) and lock_name:
+            lockfile = project_root / lock_name
+            if lockfile.is_file() and fresh_file.is_file():
+                if lockfile.stat().st_mtime > fresh_file.stat().st_mtime:
+                    return False
+
+        for relative, recorded in manifest_meta.items():
+            if not isinstance(recorded, dict):
+                return False
+            path = project_root / ("package.json" if relative == "." else relative)
+            stat = path.stat()
+            if (
+                stat.st_size != recorded.get("size")
+                or stat.st_mtime_ns // 1_000_000_000 != recorded.get("mtime_secs")
+                or stat.st_mtime_ns % 1_000_000_000 != recorded.get("mtime_nanos")
+            ):
+                return False
+        return True
+    except (OSError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+
+
+def _aube_linker_is_current(project_root: Path) -> bool:
+    """Return whether a modern aube symlink tree predates no project inputs.
+
+    Recent aube versions use ``node_modules/.aube`` plus the repository's
+    ``aube-lock.yaml`` rather than the older ``.aube-state/state.json``
+    freshness record.  The linker directory's mtime is a useful install
+    generation marker: if a manifest or aube lockfile changed afterwards,
+    let the normal install path refresh the tree.
+    """
+    linker = project_root / "node_modules" / ".aube"
+    lockfile = project_root / "aube-lock.yaml"
+    if not linker.is_dir() or not lockfile.is_file():
+        return False
+
+    try:
+        installed_at = linker.stat().st_mtime_ns
+        if lockfile.stat().st_mtime_ns > installed_at:
+            return False
+
+        manifest_paths = [project_root / "package.json"]
+        for workspace_root in ("apps", "ui-tui", "web", "tests-js"):
+            workspace_dir = project_root / workspace_root
+            if workspace_dir.is_dir():
+                manifest_paths.extend(
+                    path
+                    for path in workspace_dir.glob("**/package.json")
+                    if path.is_file()
+                )
+        return all(path.stat().st_mtime_ns <= installed_at for path in manifest_paths)
+    except OSError:
+        return False
+
+
+def _project_uses_aube(project_root: Path) -> bool:
+    """Return whether *project_root* opts into the aube install layout."""
+    if (
+        (project_root / "node_modules" / ".aube-state").is_dir()
+        or (project_root / "node_modules" / ".aube").is_dir()
+        or (project_root / "aube-lock.yaml").is_file()
+    ):
+        return True
+    try:
+        manifest = json.loads((project_root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(manifest, dict) and isinstance(manifest.get("aube"), dict)
+
+
 def _termux_workspace_install_context(
     dir: Path, *, include_child_workspaces: bool = False
 ) -> tuple[Path, tuple[str, ...]]:
@@ -1956,11 +2051,24 @@ def _tui_need_npm_install(root: Path) -> bool:
     if entry.is_file() and not lock.is_file():
         return False
 
-    ink = ws_root / "node_modules" / "@hermes" / "ink" / "package.json"
-    if not ink.is_file():
+    ink_candidates = [
+        ws_root / "node_modules" / "@hermes" / "ink" / "package.json",
+        root / "node_modules" / "@hermes" / "ink" / "package.json",
+    ]
+    if not any(path.is_file() for path in ink_candidates):
         return True
     if not lock.is_file():
         return False
+
+    # aube uses an isolated symlink tree and records freshness in
+    # ``.aube-state`` rather than npm's hidden lockfile.  Treat a current aube
+    # state as installed; otherwise this check would print the npm install
+    # banner on every TUI launch even when the bundle is perfectly runnable.
+    if (ws_root / "node_modules" / ".aube-state").is_dir():
+        return not _aube_state_is_current(ws_root)
+    if (ws_root / "node_modules" / ".aube").is_dir():
+        return not _aube_linker_is_current(ws_root)
+
     marker = ws_root / "node_modules" / ".package-lock.json"
     if not marker.is_file():
         return True
@@ -2063,7 +2171,7 @@ def _tui_need_rebuild(root: Path) -> bool:
 
 
 def _ensure_tui_node() -> None:
-    """Make sure `node` + `npm` are on PATH for the TUI.
+    """Make sure `node` is on PATH for the TUI.
 
     If either is missing and scripts/lib/node-bootstrap.sh is available, source
     it and call `ensure_node` (fnm/nvm/proto/brew/bundled cascade). After
@@ -2072,10 +2180,11 @@ def _ensure_tui_node() -> None:
     new binaries in this Python process — regardless of which version manager
     was used (nvm, fnm, proto, brew, or the bundled fallback).
 
-    Idempotent no-op when node+npm are already discoverable. Set
+    The package manager is resolved separately because aube installations do
+    not require npm at runtime. Set
     ``HERMES_SKIP_NODE_BOOTSTRAP=1`` to disable auto-install.
     """
-    if shutil.which("node") and shutil.which("npm"):
+    if shutil.which("node"):
         return
     if os.environ.get("HERMES_SKIP_NODE_BOOTSTRAP"):
         return
@@ -2260,13 +2369,14 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             return [node, "--expose-gc", str(bundled)], bundled.parent
 
     # No prebuilt bundle available (or --dev, which never uses one) — we're
-    # about to npm install/build from source, so the workspace must exist.
+    # about to install/build from source, so the workspace must exist.
     if not ext_dir:
         _ensure_tui_workspace(tui_dir)
 
-    # 2. Normal flow: npm install if needed, always esbuild, then node dist/entry.js.
-    #    --dev flow: npm install if needed, then tsx src/entry.tsx.
-    #    Existing desktop behaviour runs npm from the workspace root.  Termux
+    # 2. Normal flow: install if needed, run the workspace build, then node
+    #    dist/entry.js. --dev flow: install if needed, build hermes-ink, then
+    #    tsx src/entry.tsx. Existing desktop behaviour runs the manager from
+    #    the workspace root. Termux
     #    scopes the install to ui-tui so launch does not pull desktop/web
     #    dependencies into the hot path.
     did_install = False
@@ -2282,9 +2392,14 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
         not skip_install_for_fresh_termux_bundle
         and _tui_need_npm_install(tui_dir)
     ):
-        npm = _node_bin("npm")
+        manager = _resolve_node_runtime_package_manager(_workspace_root(tui_dir))
+        if not manager:
+            print("TUI dependencies are missing, but neither aube nor npm is available.")
+            print("Install a Node package manager, then retry `hermes --tui`.")
+            sys.exit(1)
+        manager_kind, manager_executable = manager
         if not os.environ.get("HERMES_QUIET"):
-            print("Installing TUI dependencies…")
+            print(f"Installing TUI dependencies with {manager_kind}…")
         npm_cwd = _workspace_root(tui_dir)
         # --workspace ui-tui avoids resolving apps/desktop (Electron + node-pty).
         # See #38772.
@@ -2298,9 +2413,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
                 tui_dir,
                 include_child_workspaces=True,
             )
-        npm_install_cmd = [
-            npm,
-            "install",
+        install_args = [
             *npm_workspace_args,
             # --include=dev: ui-tui's build toolchain (esbuild, typescript)
             # lives in devDependencies. An inherited NODE_ENV=production
@@ -2317,38 +2430,44 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
         def _run_tui_install() -> subprocess.CompletedProcess:
             from hermes_constants import with_hermes_node_path
 
-            # Managed tree first on PATH: if the EBADENGINE repair below
-            # provisioned a managed Node, npm's shebang/lifecycle scripts must
-            # resolve that node, not the mismatched system one.
-            return subprocess.run(
-                npm_install_cmd,
-                cwd=str(npm_cwd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+            # Managed tree first on PATH: lifecycle scripts must resolve the
+            # Hermes Node rather than a mismatched system runtime.
+            if manager_kind == "npm":
+                return subprocess.run(
+                    [manager_executable, "install", *install_args],
+                    cwd=str(npm_cwd),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=_npm_lifecycle_env(with_hermes_node_path()),
+                )
+            return _run_node_install_deterministic(
+                manager,
+                npm_cwd,
+                extra_args=tuple(install_args),
                 env=_npm_lifecycle_env(with_hermes_node_path()),
             )
 
         result = _run_tui_install()
         if result.returncode != 0:
-            # An npm outside the root package.json's `engines.npm` range fails
-            # here before doing any work; repair once (upgrade a Hermes-managed
-            # npm in place, or provision a managed runtime when the npm belongs
-            # to the user) and retry rather than dumping EBADENGINE at the user.
-            from hermes_cli.npm_engine import maybe_repair_npm_engine
+            # An npm outside the root package.json's `engines.npm` range can
+            # be repaired once. aube has its own runtime and does not need the
+            # npm-specific recovery path.
+            if manager_kind == "npm":
+                from hermes_cli.npm_engine import maybe_repair_npm_engine
 
-            combined_output = f"{result.stdout or ''}\n{result.stderr or ''}"
-            repaired_npm = maybe_repair_npm_engine(npm, combined_output)
-            if repaired_npm:
-                npm = repaired_npm
-                npm_install_cmd[0] = repaired_npm
-                result = _run_tui_install()
+                combined_output = f"{result.stdout or ''}\n{result.stderr or ''}"
+                repaired_npm = maybe_repair_npm_engine(manager_executable, combined_output)
+                if repaired_npm:
+                    manager = ("npm", repaired_npm)
+                    manager_executable = repaired_npm
+                    result = _run_tui_install()
         if result.returncode != 0:
             combined = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
             preview = "\n".join(combined.splitlines()[-30:])
-            print("npm install failed.")
+            print(f"{manager_kind} install failed.")
             if preview:
                 print(preview)
             sys.exit(1)
@@ -2360,10 +2479,13 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
         # packages/hermes-ink/dist/entry-exports.js. If that dist bundle is
         # stale after a pull, newer hooks/components can exist in src while
         # being missing at runtime (e.g. useCursorAdvance). Prebuild it here.
-        npm = _node_bin("npm")
+        manager = _resolve_node_runtime_package_manager(_workspace_root(tui_dir))
+        if not manager:
+            print("TUI dev mode requires aube or npm to run the build toolchain.")
+            sys.exit(1)
         ink_dir = tui_dir / "packages" / "hermes-ink"
         result = subprocess.run(
-            [npm, "run", "build"],
+            _node_run_command(manager, "build"),
             cwd=str(ink_dir),
             capture_output=True,
             text=True,
@@ -2382,7 +2504,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
         tsx = tui_dir / "node_modules" / ".bin" / "tsx"
         if tsx.exists():
             return [str(tsx), "src/entry.tsx"], tui_dir
-        return [npm, "start"], tui_dir
+        return _node_run_command(manager, "start"), tui_dir
 
     # Desktop/dev launches retain the historical "always rebuild" behaviour.
     # Termux cold starts use the freshness check because esbuild startup is
@@ -2392,9 +2514,12 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
         should_build = did_install or termux_need_rebuild
 
     if should_build:
-        npm = _node_bin("npm")
+        manager = _resolve_node_runtime_package_manager(_workspace_root(tui_dir))
+        if not manager:
+            print("TUI build requires aube or npm, but neither is available.")
+            sys.exit(1)
         result = subprocess.run(
-            [npm, "run", "build"],
+            _node_run_command(manager, "build"),
             cwd=str(tui_dir),
             capture_output=True,
             text=True,
@@ -5998,6 +6123,35 @@ def _run_npm_install_deterministic(
     return _attempt(repaired_npm)
 
 
+def _run_node_install_deterministic(
+    manager: tuple[str, str],
+    cwd: Path,
+    *,
+    extra_args: tuple[str, ...] = (),
+    capture_output: bool = True,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Install frontend dependencies through the selected Node manager."""
+    kind, executable = manager
+    if kind == "npm":
+        return _run_npm_install_deterministic(
+            executable,
+            cwd,
+            extra_args=extra_args,
+            capture_output=capture_output,
+            env=env,
+        )
+
+    run_env = {**os.environ, **(env or {}), "CI": "1"}
+    command = [executable, "install", *_aube_install_args(cwd, extra_args)]
+    return _run_npm_watching_for_engine_failure(
+        command,
+        cwd=cwd,
+        env=run_env,
+        capture_output=capture_output,
+    )
+
+
 def _run_npm_watching_for_engine_failure(
     cmd: list[str],
     *,
@@ -6066,7 +6220,7 @@ def _missing_web_build_tool(output: str) -> str | None:
 
 
 def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
-    """Build the web UI frontend if npm is available, serializing across processes.
+    """Build the web UI frontend, serializing concurrent builders.
 
     Concurrent dashboard boots (e.g. the desktop app's retry loop after a
     readiness timeout) used to each spawn their own ``npm install`` +
@@ -6109,7 +6263,7 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
 
 
 def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
-    """Build the web UI frontend if npm is available.
+    """Build the web UI frontend if a Node package manager is available.
 
     Args:
         web_dir: Path to the dashboard frontend source directory.
@@ -6138,17 +6292,29 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
 
     from hermes_constants import with_hermes_node_path
 
-    npm = _resolve_node_runtime_npm()
-    if not npm:
+    project_root = _workspace_root(web_dir)
+    manager = _resolve_node_runtime_package_manager(project_root)
+    if not manager:
         if fatal:
-            _say("Web UI frontend not built and npm is not available.")
-            _say("Install Node.js, then run:  cd web && npm install && npm run build")
+            _say("Web UI frontend not built and no Node package manager is available.")
+            _say(
+                "Install aube or npm, then run:  "
+                "cd web && aube install && aube run build "
+                "(or npm install && npm run build)"
+            )
         return not fatal
+    manager_kind, manager_executable = manager
+    if manager_kind == "aube":
+        manual_install = "aube install --filter ./web..."
+        manual_build = "cd web && aube run build"
+    else:
+        manual_install = "npm install --workspace web"
+        manual_build = "npm run build -w web"
     build_env = _npm_lifecycle_env(with_hermes_node_path())
     _say("→ Building web UI...")
 
     def _relay(result: "subprocess.CompletedProcess") -> None:
-        """Print captured npm output so users can see *why* a step failed.
+        """Print captured package-manager output so users can see failures.
 
         Windows users hitting `rm -rf` / `cp -r` errors (or any other
         sync-assets / Vite failure) would otherwise see only ``Web UI
@@ -6162,7 +6328,7 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
             if text:
                 _say(text)
 
-    npm_cwd = _workspace_root(web_dir)
+    npm_cwd = project_root
     # Scope the install to the web workspace only so that the full workspace
     # graph (including apps/desktop with its Electron + node-pty deps) is never
     # resolved here.  Without --workspace the root package.json's apps/* glob
@@ -6192,8 +6358,8 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
         npm_cwd, npm_workspace_args = _termux_workspace_install_context(web_dir)
 
     def _install_web_deps(*, silent: bool) -> "subprocess.CompletedProcess":
-        return _run_npm_install_deterministic(
-            npm,
+        return _run_node_install_deterministic(
+            manager,
             npm_cwd,
             extra_args=(*npm_workspace_args, "--silent", "--prefer-offline") if silent else (*npm_workspace_args, "--prefer-offline"),
             env=build_env,
@@ -6202,19 +6368,21 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
     r1 = _install_web_deps(silent=True)
     if r1.returncode != 0:
         _say(
-            f"  {'✗' if fatal else '⚠'} Web UI npm install failed"
+            f"  {'✗' if fatal else '⚠'} Web UI {manager_kind} install failed"
             + ("" if fatal else " (hermes web will not be available)")
         )
         _relay(r1)
         if fatal:
-            _say("  Run manually:  npm install --workspace web && npm run build -w web")
+            _say(f"  Run manually:  {manual_install} && {manual_build}")
         return False
     # First attempt — stream output via idle-timeout helper (issue #33788).
     # capture_output=True on a long Vite build looks identical to a hang;
     # users react by rebooting, which leaves the editable install in a
     # half-state. Streaming + idle-kill makes failures observable AND
     # recoverable (the stale-dist fallback below handles the kill path).
-    r2 = _run_with_idle_timeout([npm, "run", "build"], cwd=web_dir, env=build_env)
+    r2 = _run_with_idle_timeout(
+        _node_run_command(manager, "build"), cwd=web_dir, env=build_env
+    )
     if r2.returncode != 0:
         # The install above can exit 0 while leaving the tree without a build
         # toolchain — a lockfile-hash skip over a half-installed tree, or an
@@ -6225,13 +6393,17 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
         if missing_tool:
             _say(f"  ⚠ Build could not resolve {missing_tool} — reinstalling web dependencies...")
             _install_web_deps(silent=False)
-            r2 = _run_with_idle_timeout([npm, "run", "build"], cwd=web_dir, env=build_env)
+            r2 = _run_with_idle_timeout(
+                _node_run_command(manager, "build"), cwd=web_dir, env=build_env
+            )
         if r2.returncode != 0:
             # Retry once after a short delay — covers boot-time races on Windows
             # (antivirus scanning Node.js binaries, npm cache not ready, transient
             # I/O when launched via Scheduled Task at logon). See issue #23817.
             _time.sleep(3)
-            r2 = _run_with_idle_timeout([npm, "run", "build"], cwd=web_dir, env=build_env)
+            r2 = _run_with_idle_timeout(
+                _node_run_command(manager, "build"), cwd=web_dir, env=build_env
+            )
 
     if r2.returncode != 0:
         # _run_with_idle_timeout merges stderr into stdout; older callers
@@ -6260,7 +6432,7 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
         )
         _relay(r2)
         if fatal:
-            _say("  Run manually:  npm install --workspace web && npm run build -w web")
+            _say(f"  Run manually:  {manual_install} && {manual_build}")
         return False
     _say("  ✓ Web UI built")
     project_root = web_dir.parent.parent if web_dir.parent.name == "apps" else web_dir.parent
@@ -7661,13 +7833,15 @@ def cmd_gui(args: argparse.Namespace):
     packaged_executable = _desktop_packaged_executable(desktop_dir)
 
     if source_mode or not skip_build:
-        npm = _resolve_node_runtime_npm()
-        if not npm:
-            print("Desktop GUI requires Node.js/npm, but npm was not found on PATH.")
-            print("Install Node.js, then run:  hermes gui")
+        package_manager = _resolve_node_runtime_package_manager(PROJECT_ROOT)
+        if not package_manager:
+            print("Desktop GUI requires aube or npm, but no Node package manager was found on PATH.")
+            print("Install a Node package manager, then run:  hermes desktop")
             sys.exit(1)
+        manager_kind = package_manager[0]
     else:
-        npm = None
+        package_manager = None
+        manager_kind = None
 
     if skip_build:
         if source_mode:
@@ -7692,7 +7866,7 @@ def cmd_gui(args: argparse.Namespace):
     else:
         # Check the content-hash stamp before doing any build work.
         # If the source tree hasn't changed since the last successful build,
-        # skip the npm install + build entirely (saves a ton of useless work).
+        # skip the dependency install + build entirely (saves a ton of useless work).
         # --force-build overrides the stamp and always rebuilds.
         build_needed = force_build or _desktop_build_needed(
             desktop_dir, PROJECT_ROOT, source_mode=source_mode
@@ -7701,8 +7875,8 @@ def cmd_gui(args: argparse.Namespace):
             build_label = "source build" if source_mode else "packaged app"
             print(f"✓ Desktop {build_label} is up to date (content stamp matches)")
         else:
-            print("→ Installing desktop workspace dependencies...")
-            # Put the Hermes-managed Node on PATH so npm's child scripts (which
+            print(f"→ Installing desktop workspace dependencies with {manager_kind}...")
+            # Put the Hermes-managed Node on PATH so child scripts (which
             # shell out to bare `node`, e.g. electron-winstaller's
             # select-7z-arch.js) resolve it even when the parent PATH is
             # stripped — the desktop updater chain (Desktop → hermes-setup →
@@ -7710,11 +7884,16 @@ def cmd_gui(args: argparse.Namespace):
             # NixOS build env keeps its PYTHON hint while restoring managed Node
             # ahead of a bare PATH (same idiom as the `hermes update` path).
             nixos_env = with_hermes_node_path(_nixos_build_env())
-            install_result = _run_npm_install_deterministic(npm, PROJECT_ROOT, capture_output=False, env=nixos_env)
+            install_result = _run_node_install_deterministic(
+                package_manager,
+                PROJECT_ROOT,
+                capture_output=False,
+                env=nixos_env,
+            )
             if install_result.returncode != 0:
                 if not _electron_pkg_staged_missing_dist(PROJECT_ROOT):
                     print("✗ Desktop dependency install failed")
-                    print(f"  Run manually:  cd {PROJECT_ROOT} && npm ci")
+                    print(f"  Run manually:  cd {PROJECT_ROOT} && {manager_kind} install")
                     sys.exit(install_result.returncode or 1)
                 repaired = _try_redownload_electron_dist(PROJECT_ROOT, env)
                 if repaired:
@@ -7742,7 +7921,10 @@ def cmd_gui(args: argparse.Namespace):
                 if stopped:
                     print(f"  ⚠ Stopped running desktop app to free the build output (pid {', '.join(map(str, stopped))})")
             build_result = subprocess.run(
-                [npm, "run", build_script], cwd=desktop_dir, env=npm_build_env, check=False
+                _node_run_command(package_manager, build_script),
+                cwd=desktop_dir,
+                env=npm_build_env,
+                check=False,
             )
             if (
                 build_result.returncode != 0
@@ -7771,7 +7953,10 @@ def cmd_gui(args: argparse.Namespace):
                     # is still locked by a running instance; stop it before retry.
                     _stop_desktop_processes_locking_build(desktop_dir)
                     build_result = subprocess.run(
-                        [npm, "run", build_script], cwd=desktop_dir, env=npm_build_env, check=False
+                        _node_run_command(package_manager, build_script),
+                        cwd=desktop_dir,
+                        env=npm_build_env,
+                        check=False,
                     )
             if (
                 build_result.returncode != 0
@@ -7788,10 +7973,15 @@ def cmd_gui(args: argparse.Namespace):
                 if not _electron_dist_ok(PROJECT_ROOT):
                     _redownload_electron_dist(PROJECT_ROOT, env, mirror=mirror)
                 _stop_desktop_processes_locking_build(desktop_dir)
-                build_result = subprocess.run([npm, "run", build_script], cwd=desktop_dir, env=mirror_env, check=False)
+                build_result = subprocess.run(
+                    _node_run_command(package_manager, build_script),
+                    cwd=desktop_dir,
+                    env=mirror_env,
+                    check=False,
+                )
             if build_result.returncode != 0:
                 print("✗ Desktop GUI build failed")
-                print(f"  Run manually:  cd apps/desktop && npm run {build_script}")
+                print(f"  Run manually:  cd apps/desktop && {manager_kind} run {build_script}")
                 if sys.platform == "win32":
                     print("  If this says \"Access is denied\" on Hermes.exe, close any")
                     print("  running Hermes desktop window and retry.")
@@ -7851,7 +8041,8 @@ def cmd_gui(args: argparse.Namespace):
 
     if source_mode:
         print("→ Launching Hermes Desktop from source build...")
-        launch_result = subprocess.run([npm, "exec", "--", "electron", "."], cwd=desktop_dir, env=env, check=False)
+        launch_argv = [package_manager[1], "exec", "--", "electron", "."]
+        launch_result = subprocess.run(launch_argv, cwd=desktop_dir, env=env, check=False)
         sys.exit(launch_result.returncode)
 
     if packaged_executable is None:
@@ -9505,6 +9696,72 @@ def _resolve_node_runtime_npm() -> str | None:
         if candidate and not _is_windows_npm_path(candidate):
             return candidate
     return None
+
+
+def _resolve_node_runtime_package_manager(
+    project_root: Path | None = None,
+) -> tuple[str, str] | None:
+    """Resolve the package manager for Hermes' frontend workspaces.
+
+    Hermes still supports npm-only installations, but a checkout that has the
+    aube project configuration or an aube state directory should keep using
+    aube for installs and script execution.  This matters because npm does not
+    understand aube's isolated linker state and can recreate the tree on every
+    launch.  The returned tuple is ``(kind, executable)`` where *kind* is
+    ``"aube"`` or ``"npm"``.
+    """
+    root = _workspace_root(project_root or PROJECT_ROOT)
+    if _project_uses_aube(root):
+        aube = shutil.which("aube")
+        if aube and Path(aube).name.lower() in {"aube", "aube.cmd", "aube.exe"}:
+            return "aube", aube
+
+    npm = _resolve_node_runtime_npm()
+    return ("npm", npm) if npm else None
+
+
+def _node_run_command(
+    manager: tuple[str, str],
+    script: str,
+    *script_args: str,
+) -> list[str]:
+    """Build a no-install package script command for npm or aube."""
+    kind, executable = manager
+    if kind == "aube":
+        return [executable, "run", "--no-install", script, *script_args]
+    return [executable, "run", script, *script_args]
+
+
+def _aube_install_args(cwd: Path, extra_args: tuple[str, ...]) -> list[str]:
+    """Translate the small npm workspace-argument subset Hermes uses."""
+    args: list[str] = []
+    index = 0
+    while index < len(extra_args):
+        arg = extra_args[index]
+        if arg == "--workspace" and index + 1 < len(extra_args):
+            workspace = extra_args[index + 1]
+            workspace_path = cwd / workspace
+            selector = f"./{workspace}" if workspace_path.exists() else workspace
+            args.extend(["--filter", f"{selector}..."])
+            index += 2
+            continue
+        if arg.startswith("--workspace="):
+            workspace = arg.split("=", 1)[1]
+            workspace_path = cwd / workspace
+            selector = f"./{workspace}" if workspace_path.exists() else workspace
+            args.extend(["--filter", f"{selector}..."])
+            index += 1
+            continue
+
+        # These are npm-only compatibility flags.  aube installs dev
+        # dependencies by default and has no equivalent for npm's progress /
+        # audit switches.
+        if arg in {"--include=dev", "--no-save", "--no-fund", "--no-audit", "--progress=false", "--workspaces=false"}:
+            index += 1
+            continue
+        args.append(arg)
+        index += 1
+    return args
 
 
 class _UpdateOutputStream:

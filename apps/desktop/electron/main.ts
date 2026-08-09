@@ -687,8 +687,11 @@ function pathWithHermesManagedNode(...entries) {
 // install.ps1 / install.sh use, so a desktop-only user and a CLI-only user end
 // up with identical layouts and can share one install.
 const ACTIVE_HERMES_ROOT = path.join(HERMES_HOME, 'hermes-agent')
-// VENV_ROOT — venv lives inside the repo, exactly like install.ps1 does it.
-const VENV_ROOT = path.join(ACTIVE_HERMES_ROOT, 'venv')
+// VENV_ROOT — Hermes installs traditionally use `venv/`, while uv-managed
+// developer checkouts commonly use `.venv/`. Resolve the existing interpreter
+// once so the backend, environment overlay, health probes, and uninstall path
+// all agree on the same runtime.
+const VENV_ROOT = resolveHermesVenvRoot(ACTIVE_HERMES_ROOT)
 // BOOTSTRAP_COMPLETE_MARKER — written by the first-launch bootstrap runner
 // (Phase 1D) after install.ps1 has completed all stages and the user has
 // finished initial configuration. Presence of this marker means the install
@@ -2329,6 +2332,20 @@ function findGitBash() {
 
 function getVenvPython(venvRoot) {
   return path.join(venvRoot, IS_WINDOWS ? path.join('Scripts', 'python.exe') : path.join('bin', 'python'))
+}
+
+function resolveHermesVenvRoot(root) {
+  for (const name of ['venv', '.venv']) {
+    const candidate = path.join(root, name)
+
+    if (fileExists(getVenvPython(candidate))) {
+      return candidate
+    }
+  }
+
+  // Keep the managed-install default stable when the runtime has not been
+  // bootstrapped yet; the installer creates `<root>/venv` there.
+  return path.join(root, 'venv')
 }
 
 // Windows console-window flashes are governed by the *parent's* console, not by
@@ -4230,7 +4247,7 @@ function createPythonBackend(root, label, backendArgs, options: any = {}) {
     return null
   }
 
-  const venvRoot = path.join(root, 'venv')
+  const venvRoot = resolveHermesVenvRoot(root)
   const venvPython = getVenvPython(venvRoot)
   const command = IS_WINDOWS && fileExists(venvPython) ? venvPython : python
 

@@ -2268,8 +2268,8 @@ def _update_node_dependencies() -> list[str]:
     if not (_m().PROJECT_ROOT / "package.json").exists():
         return []
 
-    npm = _m()._resolve_node_runtime_npm()
-    if not npm:
+    package_manager = _m()._resolve_node_runtime_package_manager(_m().PROJECT_ROOT)
+    if not package_manager:
         # If the only npm reachable inside this WSL shell is the Windows one,
         # flag it loudly: silently skipping leaves ui-tui deps stale while the
         # rest of the update proceeds, and running it would corrupt the tree.
@@ -2294,7 +2294,9 @@ def _update_node_dependencies() -> list[str]:
 
     # This cache describes PROJECT_ROOT/node_modules, which is shared by every
     # Hermes profile using this checkout. Keep one per-checkout cache under the
-    # shared Hermes root rather than rerunning npm once per named profile.
+    # shared Hermes root rather than rerunning the package manager once per
+    # named profile. aube also has a native state record, which is more
+    # authoritative than the legacy npm digest.
     shared_hermes_root = get_default_hermes_root()
 
     # Best-effort: warm npx's cache for agent-browser (#43564). Runs before
@@ -2308,8 +2310,11 @@ def _update_node_dependencies() -> list[str]:
     except Exception:
         pass
 
+    if package_manager[0] == "aube" and _m()._aube_state_is_current(_m().PROJECT_ROOT):
+        logger.info("aube dependency state is current, skipping install")
+        return []
     if not _m()._npm_lockfile_changed(shared_hermes_root):
-        logger.info("npm lockfile unchanged, skipping npm install")
+        logger.info("Node dependency lockfile unchanged, skipping install")
         return []
 
     # Root package.json has no dependencies of its own (agent-browser and
@@ -2328,7 +2333,7 @@ def _update_node_dependencies() -> list[str]:
         print()
         print("  ⚠ Node.js dependency refresh did not complete cleanly; the")
         print("    installation may be in a mixed state (updated code, stale Node")
-        print("    deps). Fix npm and re-run `hermes update`.")
+        print("    deps). Fix the Node package manager and re-run `hermes update`.")
         return list(labels)
 
     install_args = [
@@ -2348,29 +2353,45 @@ def _update_node_dependencies() -> list[str]:
     nixos_env = with_hermes_node_path(_m()._nixos_build_env())
 
     # NOTE: capture_output=False here is deliberate (#18840) — optional
-    # postinstall scripts print download progress, and capturing it makes a
-    # long download look hung. The chatty npm-deprecation noise during
-    # `hermes update` comes from the *desktop* build, not this step; that
-    # one is captured to update.log.
-    result = _m()._run_npm_install_deterministic(
-        npm,
+    # postinstall scripts (e.g. @askjo/camofox-browser's browser-binary fetch)
+    # print download progress, and capturing it makes a long download look
+    # hung. The chatty npm-deprecation noise during `hermes update` comes from
+    # the *desktop* build, not this step; that one is captured to update.log.
+    root_args = [*extra_args, "--workspaces=false"]
+    root_result = _m()._run_node_install_deterministic(
+        package_manager,
         _m().PROJECT_ROOT,
         extra_args=tuple(install_args),
         capture_output=False,
         env=nixos_env,
     )
-    if result.returncode == 0:
-        _record_npm_lockfile_hash(shared_hermes_root)
-        print("  ✓ ui-tui, web workspaces installed (desktop skipped)")
-        failures: list[str] = []
-    else:
-        print("  ⚠ npm install failed")
-        stderr = (result.stderr or "").strip() if result.stderr else ""
+    if root_result.returncode != 0:
+        print(f"  ⚠ {package_manager[0]} install failed in repo root")
+        stderr = (root_result.stderr or "").strip() if root_result.stderr else ""
         if stderr:
             print(f"    {stderr.splitlines()[-1]}")
         failures = _partial_update_failure("ui-tui, web workspaces")
 
-    return failures
+    # Step 2: install only the workspaces update needs (ui-tui, web).
+    # --workspace selects specific workspaces; the rest (desktop) are skipped.
+    ws_args = [*extra_args, "--workspace", "ui-tui", "--workspace", "web"]
+    ws_result = _m()._run_node_install_deterministic(
+        package_manager,
+        _m().PROJECT_ROOT,
+        extra_args=tuple(ws_args),
+        capture_output=False,
+        env=nixos_env,
+    )
+    if ws_result.returncode == 0:
+        _record_npm_lockfile_hash(shared_hermes_root)
+        print("  ✓ repo root + ui-tui, web workspaces (desktop skipped)")
+        return []
+
+    print(f"  ⚠ {package_manager[0]} workspace install failed")
+    stderr = (ws_result.stderr or "").strip() if ws_result.stderr else ""
+    if stderr:
+        print(f"    {stderr.splitlines()[-1]}")
+    return _partial_update_failure("ui-tui, web workspaces")
 
 def _log_only_write(text: str) -> None:
     """Write ``text`` to ``~/.hermes/logs/update.log`` only, never the terminal.
@@ -4247,7 +4268,7 @@ def _rebuild_desktop_after_update(
     has_desktop_app = had_desktop_app_before_update or _desktop_app_present(desktop_dir)
     if not (
         (desktop_dir / "package.json").exists()
-        and _m()._resolve_node_runtime_npm()
+        and _m()._resolve_node_runtime_package_manager(_m().PROJECT_ROOT)
         and has_desktop_app
     ):
         return
