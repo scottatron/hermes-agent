@@ -355,6 +355,83 @@ def _run_npm_install_deterministic(
     return _attempt(repaired_npm)
 
 
+def _aube_install_args(cwd: Path, extra_args: tuple[str, ...]) -> list[str]:
+    """Translate the npm workspace-argument subset Hermes uses into aube args."""
+    args: list[str] = []
+    index = 0
+    while index < len(extra_args):
+        arg = extra_args[index]
+        if arg == "--workspace" and index + 1 < len(extra_args):
+            workspace = extra_args[index + 1]
+            selector = f"./{workspace}" if (cwd / workspace).exists() else workspace
+            args.extend(["--filter", f"{selector}..."])
+            index += 2
+            continue
+        if arg.startswith("--workspace="):
+            workspace = arg.split("=", 1)[1]
+            selector = f"./{workspace}" if (cwd / workspace).exists() else workspace
+            args.extend(["--filter", f"{selector}..."])
+            index += 1
+            continue
+        if arg == "--include-workspace-root":
+            try:
+                manifest = json.loads((cwd / "package.json").read_text(encoding="utf-8"))
+                root_name = manifest.get("name") if isinstance(manifest, dict) else None
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                root_name = None
+            if isinstance(root_name, str) and root_name:
+                args.extend(["--filter", root_name])
+            index += 1
+            continue
+        if arg in {
+            "--include=dev", "--no-save", "--no-fund",
+            "--no-audit", "--progress=false", "--workspaces=false",
+        }:
+            index += 1
+            continue
+        args.append(arg)
+        index += 1
+    return args
+
+
+def _node_run_command(
+    manager: tuple[str, str], script: str, *script_args: str
+) -> list[str]:
+    """Build a no-install package-script command for npm or aube."""
+    kind, executable = manager
+    if kind == "aube":
+        return [executable, "run", "--no-install", script, *script_args]
+    return [executable, "run", script, *script_args]
+
+
+def _run_node_install_deterministic(
+    manager: tuple[str, str],
+    cwd: Path,
+    *,
+    extra_args: tuple[str, ...] = (),
+    capture_output: bool = True,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Install frontend dependencies through the selected Node package manager."""
+    kind, executable = manager
+    if kind == "npm":
+        return _run_npm_install_deterministic(
+            executable,
+            cwd,
+            extra_args=extra_args,
+            capture_output=capture_output,
+            env=env,
+        )
+
+    run_env = _npm_lifecycle_env(env)
+    return _run_npm_watching_for_engine_failure(
+        [executable, "install", *_aube_install_args(cwd, extra_args)],
+        cwd=cwd,
+        env=run_env,
+        capture_output=capture_output,
+    )
+
+
 def _run_npm_watching_for_engine_failure(
     cmd: list[str], *, cwd: Path, env: dict[str, str], capture_output: bool
 ) -> subprocess.CompletedProcess:
@@ -460,12 +537,18 @@ def _web_npm_install_context(web_dir: Path) -> tuple[Path, tuple[str, ...]]:
     return npm_cwd, args
 
 
-def _report_web_build_failure(step: str, result: subprocess.CompletedProcess, *, fatal: bool) -> bool:
+def _report_web_build_failure(
+    step: str,
+    result: subprocess.CompletedProcess,
+    *,
+    fatal: bool,
+    manual_command: str,
+) -> bool:
     """Print the standard ``Web UI <step> failed`` block + manual hint; returns False."""
     _console_print(f"  {'✗' if fatal else '⚠'} Web UI {step} failed" + ("" if fatal else " (hermes web will not be available)"))
     _relay_npm_output(result)
     if fatal:
-        _console_print("  Run manually:  npm install --workspace web && npm run build -w web")
+        _console_print(f"  Run manually:  {manual_command}")
     return False
 
 
@@ -476,17 +559,26 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
     soft warning (used by ``hermes web``). Returns True when the build succeeded
     or was skipped (no package.json / up to date / stale dist served as fallback).
     """
-    from hermes_cli.main_install_repair import _resolve_node_runtime_npm
+    from hermes_cli.main_install_repair import _resolve_node_runtime_package_manager
     if not (web_dir / "package.json").exists() or not _web_ui_build_needed(web_dir):
         return True
 
     from hermes_constants import with_hermes_node_path
-    npm = _resolve_node_runtime_npm()
-    if not npm:
+    manager = _resolve_node_runtime_package_manager(_workspace_root(web_dir))
+    if not manager:
         if fatal:
-            _console_print("Web UI frontend not built and npm is not available.")
-            _console_print("Install Node.js, then run:  cd web && npm install && npm run build")
+            _console_print("Web UI frontend not built and no Node package manager is available.")
+            _console_print(
+                "Install aube or npm, then run: cd web && aube install && aube run build "
+                "(or npm install && npm run build)"
+            )
         return not fatal
+    manager_kind = manager[0]
+    manual_command = (
+        "aube install --filter ./web... && cd web && aube run build"
+        if manager_kind == "aube"
+        else "npm install --workspace web && npm run build -w web"
+    )
     build_env = _npm_lifecycle_env(with_hermes_node_path())
     _console_print("→ Building web UI...")
 
@@ -494,16 +586,18 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
 
     def _install_web_deps(*, silent: bool) -> subprocess.CompletedProcess:
         extra = (*npm_workspace_args, "--silent", "--prefer-offline") if silent else (*npm_workspace_args, "--prefer-offline")
-        return _run_npm_install_deterministic(npm, npm_cwd, extra_args=extra, env=build_env)
+        return _run_node_install_deterministic(manager, npm_cwd, extra_args=extra, env=build_env)
 
     def _build() -> subprocess.CompletedProcess:
         # Streamed + idle-killed (never capture_output on a long Vite build: it
         # looks identical to a hang and users reboot mid-install).
-        return _run_with_idle_timeout([npm, "run", "build"], cwd=web_dir, env=build_env)
+        return _run_with_idle_timeout(_node_run_command(manager, "build"), cwd=web_dir, env=build_env)
 
     r1 = _install_web_deps(silent=True)
     if r1.returncode != 0:
-        return _report_web_build_failure("npm install", r1, fatal=fatal)
+        return _report_web_build_failure(
+            f"{manager_kind} install", r1, fatal=fatal, manual_command=manual_command
+        )
     r2 = _build()
     if r2.returncode != 0:
         # The install can exit 0 over a half-installed tree (lockfile-hash skip,
@@ -533,7 +627,9 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
             if preview:
                 _console_print("  Build error:\n  " + "\n  ".join(preview.splitlines()[-10:]))
             return True
-        return _report_web_build_failure("build", r2, fatal=fatal)
+        return _report_web_build_failure(
+            "build", r2, fatal=fatal, manual_command=manual_command
+        )
     _console_print("  ✓ Web UI built")
     _write_web_ui_build_stamp(_web_project_root(web_dir), web_dir)
     return True

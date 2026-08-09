@@ -89,9 +89,6 @@ _ALLOWED: dict[tuple[str, str], str] = {
         "_ensure_tui_node()'s idempotence gate: the question really is 'is "
         "node already discoverable on PATH', before bootstrapping one."
     ),
-    ("hermes_cli/main_tui_launch.py", "npm"): (
-        "Same _ensure_tui_node() gate as node."
-    ),
     ("hermes_cli/main_install_repair.py", "npm"): (
         "_resolve_node_runtime_npm()'s WSL re-scan: PATH minus /mnt/* IS the question."
     ),

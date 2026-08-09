@@ -550,8 +550,8 @@ def _update_node_dependencies() -> list[str]:
     if not (_m().PROJECT_ROOT / "package.json").exists():
         return []
 
-    npm = _m()._resolve_node_runtime_npm()
-    if not npm:
+    package_manager = _m()._resolve_node_runtime_package_manager(_m().PROJECT_ROOT)
+    if not package_manager:
         # Only a Windows npm reachable from WSL: flag loudly — skipping silently leaves
         # deps stale, running it would corrupt the tree.
         from hermes_constants import is_wsl
@@ -587,8 +587,19 @@ def _update_node_dependencies() -> list[str]:
         from tools.browser_tool_install import warm_agent_browser_npx_cache
         warm_agent_browser_npx_cache()
 
-    if not _m()._npm_lockfile_changed(shared_hermes_root):
-        logger.info("npm lockfile unchanged, skipping npm install")
+    if package_manager[0] == "aube":
+        from hermes_cli.main_tui_launch import (
+            _aube_linker_is_current,
+            _aube_state_is_current,
+        )
+
+        if _aube_state_is_current(_m().PROJECT_ROOT) or _aube_linker_is_current(
+            _m().PROJECT_ROOT
+        ):
+            logger.info("aube dependency state is current, skipping install")
+            return []
+    elif not _m()._npm_lockfile_changed(shared_hermes_root):
+        logger.info("Node dependency lockfile unchanged, skipping install")
         return []
 
     # Root package.json has no deps of its own, so a workspace-scoped install prunes nothing
@@ -609,20 +620,25 @@ def _update_node_dependencies() -> list[str]:
     # capturing makes a long download look hung.
     # The chatty npm-deprecation noise during `hermes update` comes from the *desktop* build, not this step;
     # that one is captured to update.log. See #18840.
-    result = _m()._run_npm_install_deterministic(
-        npm, _m().PROJECT_ROOT, extra_args=tuple(install_args), capture_output=False, env=nixos_env)
+    result = _m()._run_node_install_deterministic(
+        package_manager,
+        _m().PROJECT_ROOT,
+        extra_args=tuple(install_args),
+        capture_output=False,
+        env=nixos_env,
+    )
     if result.returncode == 0:
         _record_npm_lockfile_hash(shared_hermes_root)
         print("  ✓ ui-tui, web workspaces installed (desktop skipped)")
         return []
-    print("  ⚠ npm install failed")
+    print(f"  ⚠ {package_manager[0]} install failed")
     stderr = (result.stderr or "").strip()
     if stderr:
         print(f"    {stderr.splitlines()[-1]}")
     print()
     print("  ⚠ Node.js dependency refresh did not complete cleanly; the")
     print("    installation may be in a mixed state (updated code, stale Node")
-    print("    deps). Fix npm and re-run `hermes update`.")
+    print("    deps). Fix the Node package manager and re-run `hermes update`.")
     return ["ui-tui, web workspaces"]
 
 
@@ -822,7 +838,10 @@ def _rebuild_desktop_after_update(
     # Never make people who never used Desktop pay for an Electron build.
     has_desktop_app = had_desktop_app_before_update or _desktop_app_present(desktop_dir)
     if not (
-        (desktop_dir / "package.json").exists() and _m()._resolve_node_runtime_npm() and has_desktop_app):
+        (desktop_dir / "package.json").exists()
+        and _m()._resolve_node_runtime_package_manager(_m().PROJECT_ROOT)
+        and has_desktop_app
+    ):
         return True
 
     print("→ Checking if desktop app needs rebuilding...")

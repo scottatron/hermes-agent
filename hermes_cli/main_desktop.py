@@ -1245,22 +1245,28 @@ def _register_linux_desktop_entry() -> None:
         print(f"⚠ Could not install the desktop launcher entry: {exc}")
 
 
-def _install_desktop_workspace_deps(npm: str, env: dict) -> None:
-    """npm-install the desktop workspace; exits on a failure that isn't a repairable missing Electron dist."""
+def _install_desktop_workspace_deps(manager: tuple[str, str], env: dict) -> None:
+    """Install desktop deps; exit on a failure that isn't a repairable missing Electron dist."""
     from hermes_cli.main import PROJECT_ROOT
-    from hermes_cli.main_web_build import _run_npm_install_deterministic
+    from hermes_cli.main_web_build import _run_node_install_deterministic
     from hermes_constants import with_hermes_node_path
-    print("→ Installing desktop workspace dependencies...")
+    manager_kind = manager[0]
+    print(f"→ Installing desktop workspace dependencies with {manager_kind}...")
     # Managed Node on PATH so npm's child scripts that shell out to bare `node`
     # (e.g. electron-winstaller's select-7z-arch.js) resolve it even when the
     # desktop updater chain lost shell PATH customizations. Wrapping the NixOS
     # env keeps its PYTHON hint while restoring managed Node ahead of PATH.
     nixos_env = with_hermes_node_path(_nixos_build_env())
-    install_result = _run_npm_install_deterministic(npm, PROJECT_ROOT, capture_output=False, env=nixos_env)
+    install_result = _run_node_install_deterministic(
+        manager, PROJECT_ROOT, capture_output=False, env=nixos_env
+    )
     if install_result.returncode == 0:
         return
     if not _electron_pkg_staged_missing_dist(PROJECT_ROOT):
-        print(f"✗ Desktop dependency install failed\n  Run manually:  cd {PROJECT_ROOT} && npm ci")
+        print(
+            "✗ Desktop dependency install failed\n"
+            f"  Run manually:  cd {PROJECT_ROOT} && {manager_kind} install"
+        )
         sys.exit(install_result.returncode or 1)
     if _try_redownload_electron_dist(PROJECT_ROOT, env):
         print("  ⚠ Dependency install failed with a missing Electron dist; "
@@ -1350,11 +1356,15 @@ def _promote_staged_desktop_app(desktop_dir: Path, staging_dir: Path) -> Path:
     return packaged_executable
 
 
-def _build_desktop_app(desktop_dir: Path, *, source_mode: bool, npm: str, env: dict) -> Optional[Path]:
-    """npm-install + build the desktop app, stage-and-swapping the packaged tree. Returns the new
+def _build_desktop_app(
+    desktop_dir: Path, *, source_mode: bool, manager: tuple[str, str], env: dict
+) -> Optional[Path]:
+    """Install + build the desktop app, stage-and-swapping the packaged tree. Returns the new
     packaged exe (None in source mode). Exits on unrecoverable failure with the previous app kept."""
     from hermes_cli.main import PROJECT_ROOT
-    _install_desktop_workspace_deps(npm, env)
+    from hermes_cli.main_web_build import _node_run_command
+
+    _install_desktop_workspace_deps(manager, env)
 
     build_label = "source build" if source_mode else "packaged app"
     print(f"→ Building desktop {build_label}...")
@@ -1369,7 +1379,7 @@ def _build_desktop_app(desktop_dir: Path, *, source_mode: bool, npm: str, env: d
     # only replaced — by rename — after the staged result verifies.
     # See #86443.
     staging_dir: Optional[Path] = None
-    build_cmd = [npm, "run", build_script]
+    build_cmd = _node_run_command(manager, build_script)
     if not source_mode:
         staging_dir = _desktop_staging_dir(desktop_dir)
         build_cmd += ["--", f"-c.directories.output={staging_dir}"]
@@ -1386,7 +1396,7 @@ def _build_desktop_app(desktop_dir: Path, *, source_mode: bool, npm: str, env: d
             _discard_desktop_staging(staging_dir)
             if _desktop_packaged_executable(desktop_dir) is not None:
                 print(_PREVIOUS_APP_KEPT)
-        print(f"  Run manually:  cd apps/desktop && npm run {build_script}")
+        print(f"  Run manually:  cd apps/desktop && {manager[0]} run {build_script}")
         if sys.platform == "win32":
             print("  If this says \"Access is denied\" on Hermes.exe, close any")
             print("  running Hermes desktop window and retry.")
@@ -1478,7 +1488,7 @@ def _packaged_desktop_launch_command(packaged_executable: Path) -> list[str]:
 def cmd_gui(args: argparse.Namespace):
     """Build and launch the native Electron desktop GUI."""
     from hermes_cli.main import PROJECT_ROOT
-    from hermes_cli.main_install_repair import _resolve_node_runtime_npm
+    from hermes_cli.main_install_repair import _resolve_node_runtime_package_manager
     desktop_dir = PROJECT_ROOT / "apps" / "desktop"
     if not (desktop_dir / "package.json").exists():
         print(f"Desktop GUI source not found at: {desktop_dir}")
@@ -1502,12 +1512,12 @@ def cmd_gui(args: argparse.Namespace):
 
     packaged_executable = _desktop_packaged_executable(desktop_dir)
 
-    npm = None
+    package_manager = None
     if source_mode or not skip_build:
-        npm = _resolve_node_runtime_npm()
-        if not npm:
-            print("Desktop GUI requires Node.js/npm, but npm was not found on PATH.")
-            print("Install Node.js, then run:  hermes gui")
+        package_manager = _resolve_node_runtime_package_manager(PROJECT_ROOT)
+        if not package_manager:
+            print("Desktop GUI requires aube or npm, but no Node package manager was found on PATH.")
+            print("Install a Node package manager, then run:  hermes desktop")
             sys.exit(1)
 
     if skip_build:
@@ -1516,7 +1526,9 @@ def cmd_gui(args: argparse.Namespace):
         )
     elif force_build or _desktop_build_needed(desktop_dir, PROJECT_ROOT, source_mode=source_mode):
         # --force-build overrides the content-hash stamp and always rebuilds.
-        built = _build_desktop_app(desktop_dir, source_mode=source_mode, npm=npm, env=env)
+        built = _build_desktop_app(
+            desktop_dir, source_mode=source_mode, manager=package_manager, env=env
+        )
         if not source_mode:
             packaged_executable = built
     else:
@@ -1547,7 +1559,7 @@ def cmd_gui(args: argparse.Namespace):
 
     if source_mode:
         print("→ Launching Hermes Desktop from source build...")
-        launch_command = [npm, "exec", "--", "electron", "."]
+        launch_command = [package_manager[1], "exec", "--", "electron", "."]
     else:
         if packaged_executable is None:
             print(f"✗ Desktop package build completed but no launchable app was found at: {desktop_dir / 'release'}")

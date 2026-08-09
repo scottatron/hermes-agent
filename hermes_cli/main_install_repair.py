@@ -1176,6 +1176,23 @@ def _resolve_node_runtime_npm() -> str | None:
     return None
 
 
+def _resolve_node_runtime_package_manager(
+    project_root: Path | None = None,
+) -> tuple[str, str] | None:
+    """Resolve the aube or npm executable appropriate for this checkout."""
+    from hermes_cli.main import PROJECT_ROOT
+    from hermes_cli.main_tui_launch import _project_uses_aube, _workspace_root
+
+    root = _workspace_root(project_root or PROJECT_ROOT)
+    if _project_uses_aube(root):
+        aube = shutil.which("aube")
+        if aube and Path(aube).name.lower() in {"aube", "aube.cmd", "aube.exe"}:
+            return "aube", aube
+
+    npm = _resolve_node_runtime_npm()
+    return ("npm", npm) if npm else None
+
+
 def _resolve_update_branch(args) -> str:
     """Normalize ``args.branch`` to a non-empty name (default ``main``; blank/whitespace = default)."""
     return (getattr(args, "branch", None) or "main").strip() or "main"

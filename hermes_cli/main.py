@@ -730,6 +730,7 @@ from hermes_cli.main_install_repair import (  # frozen updater surface: update_c
     _repair_venv_via_import_probes,
     _resolve_install_target_python,
     _resolve_node_runtime_npm,
+    _resolve_node_runtime_package_manager,
     _resolve_update_branch,
     _run_install_with_heartbeat,
     _run_package_only_install,
@@ -754,6 +755,7 @@ from hermes_cli.main_web_build import (  # frozen updater surface: update_cmd*.p
     _build_web_ui,
     _nixos_build_env,
     _record_bytecode_fingerprint,
+    _run_node_install_deterministic,
     _run_npm_install_deterministic,
 )
 from hermes_cli.main_tui_launch import (

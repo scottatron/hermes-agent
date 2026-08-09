@@ -98,6 +98,81 @@ def _workspace_root(dir: Path) -> Path:
     return dir
 
 
+def _aube_state_is_current(project_root: Path) -> bool:
+    """Return whether a legacy aube-managed ``node_modules`` tree is current."""
+    state_dir = project_root / "node_modules" / ".aube-state"
+    state_file = state_dir / "state.json"
+    fresh_file = state_dir / "fresh.json"
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            return False
+        manifest_meta = state.get("package_json_meta")
+        if not isinstance(manifest_meta, dict) or not manifest_meta:
+            return False
+
+        lock_name = state.get("lockfile_snapshot_name")
+        if isinstance(lock_name, str) and lock_name:
+            lockfile = project_root / lock_name
+            if lockfile.is_file() and fresh_file.is_file():
+                if lockfile.stat().st_mtime > fresh_file.stat().st_mtime:
+                    return False
+
+        for relative, recorded in manifest_meta.items():
+            if not isinstance(recorded, dict):
+                return False
+            path = project_root / ("package.json" if relative == "." else relative)
+            stat = path.stat()
+            if (
+                stat.st_size != recorded.get("size")
+                or stat.st_mtime_ns // 1_000_000_000 != recorded.get("mtime_secs")
+                or stat.st_mtime_ns % 1_000_000_000 != recorded.get("mtime_nanos")
+            ):
+                return False
+        return True
+    except (OSError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+
+
+def _aube_linker_is_current(project_root: Path) -> bool:
+    """Return whether the modern aube linker tree predates no project inputs."""
+    linker = project_root / "node_modules" / ".aube"
+    lockfile = project_root / "aube-lock.yaml"
+    if not linker.is_dir() or not lockfile.is_file():
+        return False
+
+    try:
+        installed_at = linker.stat().st_mtime_ns
+        if lockfile.stat().st_mtime_ns > installed_at:
+            return False
+
+        manifest_paths = [project_root / "package.json"]
+        for workspace_root in ("apps", "ui-tui", "web", "tests-js"):
+            workspace_dir = project_root / workspace_root
+            if workspace_dir.is_dir():
+                manifest_paths.extend(
+                    path for path in workspace_dir.glob("**/package.json") if path.is_file()
+                )
+        return all(path.stat().st_mtime_ns <= installed_at for path in manifest_paths)
+    except OSError:
+        return False
+
+
+def _project_uses_aube(project_root: Path) -> bool:
+    """Return whether *project_root* opts into the aube install layout."""
+    if (
+        (project_root / "node_modules" / ".aube-state").is_dir()
+        or (project_root / "node_modules" / ".aube").is_dir()
+        or (project_root / "aube-lock.yaml").is_file()
+    ):
+        return True
+    try:
+        manifest = json.loads((project_root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(manifest, dict) and isinstance(manifest.get("aube"), dict)
+
+
 def _child_workspace_dirs(dir: Path):
     """Sorted ``dir/packages/*`` subdirs that carry a ``package.json``."""
     packages_dir = dir / "packages"
@@ -219,10 +294,20 @@ def _tui_need_npm_install(root: Path) -> bool:
     if entry.is_file() and not lock.is_file():
         return False
 
-    if not (ws_root / "node_modules" / "@hermes" / "ink" / "package.json").is_file():
+    ink_candidates = (
+        ws_root / "node_modules" / "@hermes" / "ink" / "package.json",
+        root / "node_modules" / "@hermes" / "ink" / "package.json",
+    )
+    if not any(path.is_file() for path in ink_candidates):
         return True
     if not lock.is_file():
         return False
+
+    if (ws_root / "node_modules" / ".aube-state").is_dir():
+        return not _aube_state_is_current(ws_root)
+    if (ws_root / "node_modules" / ".aube").is_dir():
+        return not _aube_linker_is_current(ws_root)
+
     marker = ws_root / "node_modules" / ".package-lock.json"
     if not marker.is_file():
         return True
@@ -325,10 +410,9 @@ def _tui_need_rebuild(root: Path) -> bool:
 
 
 def _ensure_tui_node() -> None:
-    """Ensure `node` + `npm` are on PATH: else run node-bootstrap.sh `ensure_node` and prepend
-    the resolved node dir to PATH. ``HERMES_SKIP_NODE_BOOTSTRAP=1`` disables auto-install."""
+    """Ensure ``node`` is on PATH; package-manager resolution is handled separately."""
     from hermes_cli.main import PROJECT_ROOT
-    if shutil.which("node") and shutil.which("npm"):
+    if shutil.which("node"):
         return
     if os.environ.get("HERMES_SKIP_NODE_BOOTSTRAP"):
         return
@@ -461,26 +545,37 @@ def _exit_on_npm_failure(result: subprocess.CompletedProcess, message: str, *, s
     sys.exit(1)
 
 
-def _run_tui_npm_build(npm: str, cwd: Path, failure_message: str) -> None:
-    """``npm run build`` in *cwd*; exit with *failure_message* + output tail on failure."""
+def _run_tui_node_build(
+    manager: tuple[str, str], cwd: Path, failure_message: str
+) -> None:
+    """Run the package build script and exit with an output tail on failure."""
+    from hermes_cli.main_web_build import _node_run_command
+
     result = subprocess.run(
-        [npm, "run", "build"], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
+        _node_run_command(manager, "build"), cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
         errors="replace", env=_npm_lifecycle_env())
     _exit_on_npm_failure(result, failure_message, sep="")
 
 
 def _install_tui_dependencies(tui_dir: Path, *, termux_startup: bool) -> None:
-    """``npm install`` for the TUI workspace, with one EBADENGINE repair retry. Exits on failure.
+    """Install TUI dependencies, with one npm EBADENGINE repair retry. Exits on failure.
 
     ``--workspace ui-tui`` avoids resolving apps/desktop (Electron + node-pty) and
     is omitted when ui-tui/ has its own lockfile. ``--include=dev``: the build
     toolchain is in devDependencies and an inherited ``NODE_ENV=production`` /
     ``omit=dev`` would silently skip it.
     """
-    npm = _tui_node_bin("npm")
-    if not os.environ.get("HERMES_QUIET"):
-        print("Installing TUI dependencies…")
     npm_cwd = _workspace_root(tui_dir)
+    from hermes_cli.main_install_repair import _resolve_node_runtime_package_manager
+
+    manager = _resolve_node_runtime_package_manager(npm_cwd)
+    if not manager:
+        print("TUI dependencies are missing, but neither aube nor npm is available.")
+        print("Install a Node package manager, then retry `hermes --tui`.")
+        sys.exit(1)
+    manager_kind, manager_executable = manager
+    if not os.environ.get("HERMES_QUIET"):
+        print(f"Installing TUI dependencies with {manager_kind}…")
     # --workspace ui-tui avoids resolving apps/desktop (Electron + node-pty). See #38772. When ui-tui/ has
     # its own package-lock.json (e.g. curl install), _workspace_root() returns tui_dir itself. Passing
     # --workspace in that case fails because npm cannot find a workspace named "ui-tui" inside ui-tui/. See
@@ -488,31 +583,49 @@ def _install_tui_dependencies(tui_dir: Path, *, termux_startup: bool) -> None:
     npm_workspace_args: tuple[str, ...] = () if npm_cwd == tui_dir else ("--workspace", "ui-tui")
     if termux_startup:
         npm_cwd, npm_workspace_args = _termux_workspace_install_context(tui_dir, include_child_workspaces=True)
-    npm_install_cmd = [
-        npm, "install", *npm_workspace_args,
+    install_args = [
+        *npm_workspace_args,
         "--include=dev", "--silent", "--no-fund", "--no-audit", "--progress=false",
     ]
 
     def _run_tui_install() -> subprocess.CompletedProcess:
+        nonlocal manager
         from hermes_constants import with_hermes_node_path
+        from hermes_cli.main_web_build import _run_node_install_deterministic
+
         # Managed tree first on PATH: if the EBADENGINE repair provisioned a
         # managed Node, npm's shebang/lifecycle scripts must resolve that node.
-        return subprocess.run(
-            npm_install_cmd, cwd=str(npm_cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
-            env=_npm_lifecycle_env(with_hermes_node_path()))
+        run_env = _npm_lifecycle_env(with_hermes_node_path())
+        if manager[0] == "npm":
+            return subprocess.run(
+                [manager[1], "install", *install_args],
+                cwd=str(npm_cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=run_env,
+            )
+        return _run_node_install_deterministic(
+            manager,
+            npm_cwd,
+            extra_args=tuple(install_args),
+            env=run_env,
+        )
 
     result = _run_tui_install()
     if result.returncode != 0:
-        # An npm outside the root `engines.npm` range fails before doing any work;
-        # repair once (upgrade a managed npm in place, or provision a managed
-        # runtime) and retry rather than dumping EBADENGINE at the user.
-        from hermes_cli.npm_engine import maybe_repair_npm_engine
-        repaired_npm = maybe_repair_npm_engine(npm, f"{result.stdout or ''}\n{result.stderr or ''}")
-        if repaired_npm:
-            npm_install_cmd[0] = repaired_npm
-            result = _run_tui_install()
-    _exit_on_npm_failure(result, "npm install failed.", sep="\n")
+        if manager_kind == "npm":
+            from hermes_cli.npm_engine import maybe_repair_npm_engine
+
+            repaired_npm = maybe_repair_npm_engine(
+                manager_executable, f"{result.stdout or ''}\n{result.stderr or ''}"
+            )
+            if repaired_npm:
+                manager = ("npm", repaired_npm)
+                result = _run_tui_install()
+    _exit_on_npm_failure(result, f"{manager_kind} install failed.", sep="\n")
 
 
 def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
@@ -566,17 +679,29 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
         # --dev runs src/entry.tsx directly, but @hermes/ink resolves through
         # packages/hermes-ink/dist/entry-exports.js; a stale dist after a pull
         # leaves newer hooks/components missing at runtime. Prebuild it here.
-        npm = _tui_node_bin("npm")
-        _run_tui_npm_build(npm, tui_dir / "packages" / "hermes-ink", "TUI dev prebuild failed.")
+        from hermes_cli.main_install_repair import _resolve_node_runtime_package_manager
+        from hermes_cli.main_web_build import _node_run_command
+
+        manager = _resolve_node_runtime_package_manager(_workspace_root(tui_dir))
+        if not manager:
+            print("TUI dev mode requires aube or npm to run the build toolchain.")
+            sys.exit(1)
+        _run_tui_node_build(manager, tui_dir / "packages" / "hermes-ink", "TUI dev prebuild failed.")
         tsx = tui_dir / "node_modules" / ".bin" / "tsx"
         if tsx.exists():
             return [str(tsx), "src/entry.tsx"], tui_dir
-        return [npm, "start"], tui_dir
+        return _node_run_command(manager, "start"), tui_dir
 
     # Desktop/dev launches always rebuild; Termux cold starts use the freshness
     # check because esbuild startup is expensive on old mobile CPUs.
     if not termux_startup or did_install or termux_need_rebuild:
-        _run_tui_npm_build(_tui_node_bin("npm"), tui_dir, "TUI build failed.")
+        from hermes_cli.main_install_repair import _resolve_node_runtime_package_manager
+
+        manager = _resolve_node_runtime_package_manager(_workspace_root(tui_dir))
+        if not manager:
+            print("TUI build requires aube or npm, but neither is available.")
+            sys.exit(1)
+        _run_tui_node_build(manager, tui_dir, "TUI build failed.")
 
     return [_tui_node_bin("node"), "--expose-gc", str(tui_dir / "dist" / "entry.js")], tui_dir
 
