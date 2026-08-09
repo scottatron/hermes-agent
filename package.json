@@ -71,5 +71,12 @@
     "fsevents@2.3.2": true,
     "fsevents@2.3.3": true,
     "get-windows@9.3.0": true
+  },
+  "aube": {
+    "allowBuilds": {
+      "agent-browser": true,
+      "get-windows": true,
+      "unicode-animations": true
+    }
   }
 }
