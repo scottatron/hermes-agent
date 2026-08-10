@@ -358,6 +358,8 @@ DEFAULT_CONFIG = {
         # pods/exec (create), pods/log (get), and events (list).
         # NOTE: ~/.hermes credentials and skills are NOT synced into the pod,
         # and the /workspace volume is an emptyDir that dies with the pod.
+        # File-based credentials therefore do not reach the pod; use
+        # k8s_forward_env / k8s_env below for anything that fits in an env var.
         "k8s_image": "nikolaik/python-nodejs:python3.11-nodejs20",
         "k8s_namespace": "default",
         "k8s_context": "",          # "" = kubectl's current-context
@@ -368,6 +370,18 @@ DEFAULT_CONFIG = {
         # image-pull and scheduling failures are visible.
         "k8s_pod_ready_timeout": 120,
         "k8s_extra_args": [],       # Extra flags passed verbatim to every kubectl call
+        # Host environment variables to forward into the pod, by name. Values
+        # come from the Hermes process or ~/.hermes/.env. The docker_forward_env
+        # analogue — an explicit operator opt-in, so these are exempt from the
+        # provider-credential blocklist that filters skill-registered
+        # passthrough. Example: ["GH_TOKEN", "AWS_PROFILE"]
+        "k8s_forward_env": [],
+        # Literal KEY: VALUE pairs set in the pod, e.g. {"TZ": "UTC"}. Unlike
+        # k8s_forward_env these carry their values from config, not the host.
+        # Both reach the pod as `export` statements in the exec'd command, so
+        # they are visible in the pod's process list — see the backend module
+        # docstring before putting a high-value secret here.
+        "k8s_env": {},
         # Container resource limits (docker, singularity, modal, daytona, vercel_sandbox,
         # kubernetes — ignored for local/ssh)
         "container_cpu": 1,

@@ -216,6 +216,8 @@ def k8s_container_config(config: dict[str, Any]) -> dict[str, Any]:
         "k8s_service_account": config.get("k8s_service_account", ""),
         "k8s_pod_ready_timeout": config.get("k8s_pod_ready_timeout", 120),
         "k8s_extra_args": config.get("k8s_extra_args", []),
+        "k8s_forward_env": config.get("k8s_forward_env", []),
+        "k8s_env": config.get("k8s_env", {}),
     }
 
 
@@ -1552,9 +1554,13 @@ def _get_env_config() -> Dict[str, Any]:
     if env_type == "kubernetes":
         k8s_extra_args = _parse_env_var("TERMINAL_K8S_EXTRA_ARGS", "[]", json.loads, "valid JSON")
         k8s_pod_ready_timeout = _parse_env_var("TERMINAL_K8S_POD_READY_TIMEOUT", "120")
+        k8s_forward_env = _parse_env_var("TERMINAL_K8S_FORWARD_ENV", "[]", json.loads, "valid JSON")
+        k8s_env = _parse_env_var("TERMINAL_K8S_ENV", "{}", json.loads, "valid JSON")
     else:
         k8s_extra_args = []
         k8s_pod_ready_timeout = 120
+        k8s_forward_env = []
+        k8s_env = {}
 
     # Docker/container-only env vars may be bridged from config.yaml even when
     # the active backend is local/ssh.  Do not parse their JSON/numeric payloads
@@ -1639,6 +1645,8 @@ def _get_env_config() -> Dict[str, Any]:
         "k8s_service_account": os.getenv("TERMINAL_K8S_SERVICE_ACCOUNT", ""),
         "k8s_pod_ready_timeout": k8s_pod_ready_timeout,
         "k8s_extra_args": k8s_extra_args,
+        "k8s_forward_env": k8s_forward_env,
+        "k8s_env": k8s_env,
         "cwd": cwd,
         "host_cwd": host_cwd,
         "docker_mount_cwd_to_workspace": mount_docker_cwd,
@@ -1905,6 +1913,8 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             persistent_filesystem=persistent, task_id=task_id,
             pod_ready_timeout=cc.get("k8s_pod_ready_timeout", 120),
             extra_args=cc.get("k8s_extra_args", []),
+            forward_env=cc.get("k8s_forward_env", []),
+            env=cc.get("k8s_env", {}),
         )
 
     elif env_type == "ssh":

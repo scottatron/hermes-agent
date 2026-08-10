@@ -32,8 +32,12 @@ class TestIsUnusableContainerCwd:
 
 
     def test_container_backends_set(self):
+        # kubernetes is fork-local (see CARRYING_PATCHES.md row 6): its pod cwd
+        # is as un-host-like as any other container backend's, so it belongs in
+        # this set and this pin has to know about it.
         assert tt._CONTAINER_BACKENDS == frozenset(
-            {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}
+            {"docker", "singularity", "modal", "daytona", "vercel_sandbox",
+             "kubernetes"}
         )
 
 

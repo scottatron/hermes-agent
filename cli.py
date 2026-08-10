@@ -679,6 +679,8 @@ def load_cli_config() -> Dict[str, Any]:
         "k8s_service_account": "TERMINAL_K8S_SERVICE_ACCOUNT",
         "k8s_pod_ready_timeout": "TERMINAL_K8S_POD_READY_TIMEOUT",
         "k8s_extra_args": "TERMINAL_K8S_EXTRA_ARGS",
+        "k8s_forward_env": "TERMINAL_K8S_FORWARD_ENV",
+        "k8s_env": "TERMINAL_K8S_ENV",
         # SSH config
         "ssh_host": "TERMINAL_SSH_HOST",
         "ssh_user": "TERMINAL_SSH_USER",

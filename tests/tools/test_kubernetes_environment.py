@@ -332,6 +332,104 @@ class TestRunBash:
 
 
 # ---------------------------------------------------------------------------
+# Environment forwarding
+# ---------------------------------------------------------------------------
+
+class TestEnvForwarding:
+    """``kubectl exec`` has no ``-e``, so variables ride in the command text."""
+
+    @staticmethod
+    def _capture(monkeypatch):
+        scripts = []
+
+        def _fake_popen(cmd, stdin_data=None, **kwargs):
+            scripts.append(cmd[-1])
+            return _make_proc()
+
+        monkeypatch.setattr(f"{MODULE}._popen_bash", _fake_popen)
+        return scripts
+
+    @staticmethod
+    def _stub_passthrough(monkeypatch, env, unset=()):
+        monkeypatch.setattr(
+            f"{MODULE}.resolve_passthrough_env",
+            lambda forward_env: (dict(env), set(unset)),
+        )
+
+    def test_config_env_is_injected(self, make_env, monkeypatch):
+        env = make_env(task_id="t1", env={"TZ": "UTC"})
+        scripts = self._capture(monkeypatch)
+
+        env._run_bash("true", login=True)
+
+        assert "export TZ=UTC\n" in scripts[0]
+
+    def test_values_are_shell_quoted(self, make_env, monkeypatch):
+        """An unquoted value would be a command-injection hole in the prelude."""
+        env = make_env(task_id="t1", env={"MSG": "a; touch /pwned"})
+        scripts = self._capture(monkeypatch)
+
+        env._run_bash("true", login=True)
+
+        assert "export MSG='a; touch /pwned'\n" in scripts[0]
+
+    def test_prelude_precedes_the_command(self, make_env, monkeypatch):
+        env = make_env(task_id="t1", env={"TZ": "UTC"})
+        scripts = self._capture(monkeypatch)
+
+        env._run_bash("echo hi", login=True)
+
+        assert scripts[0].endswith("echo hi")
+        assert scripts[0].index("export TZ") < scripts[0].index("echo hi")
+
+    def test_config_env_is_not_resent_after_init(self, make_env, monkeypatch):
+        """init seeds the snapshot; re-sending on every command is waste."""
+        env = make_env(task_id="t1", env={"TZ": "UTC"})
+        self._stub_passthrough(monkeypatch, {})
+        scripts = self._capture(monkeypatch)
+
+        env._run_bash("echo hi", login=False)
+
+        assert scripts[0] == "echo hi"
+
+    def test_passthrough_is_resent_on_every_command(self, make_env, monkeypatch):
+        """The pod name has no profile in it, so a pod is shared across profiles.
+
+        Profile-scoped values must therefore never live in the snapshot; they
+        are re-resolved and re-injected per command instead.
+        """
+        env = make_env(task_id="t1")
+        self._stub_passthrough(monkeypatch, {"GH_TOKEN": "scoped"})
+        scripts = self._capture(monkeypatch)
+
+        env._run_bash("echo hi", login=False)
+
+        assert "export GH_TOKEN=scoped\n" in scripts[0]
+
+    def test_names_absent_from_the_scope_are_unset(self, make_env, monkeypatch):
+        """Otherwise the previous profile's value shows through the snapshot."""
+        env = make_env(task_id="t1")
+        self._stub_passthrough(monkeypatch, {}, unset={"GH_TOKEN"})
+        scripts = self._capture(monkeypatch)
+
+        env._run_bash("echo hi", login=False)
+
+        assert scripts[0].startswith("unset GH_TOKEN 2>/dev/null || true\n")
+
+    def test_forward_env_names_are_snapshot_excluded(self, make_env):
+        """Explicitly forwarded values must not persist into a shared snapshot."""
+        env = make_env(task_id="t1", forward_env=["GH_TOKEN"])
+        assert env._profile_scoped_passthrough is True
+        assert "GH_TOKEN" in env._additional_profile_scoped_passthrough_names()
+
+    def test_malformed_config_is_tolerated(self, make_env):
+        """A bad config.yaml value must not make every command fail."""
+        env = make_env(task_id="t1", forward_env="NOT_A_LIST", env="NOT_A_DICT")
+        assert env._forward_env == []
+        assert env._env == {}
+
+
+# ---------------------------------------------------------------------------
 # CWD handling
 # ---------------------------------------------------------------------------
 

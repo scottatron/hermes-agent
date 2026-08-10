@@ -11,7 +11,15 @@ machinery works unchanged — no threaded handle adapter is needed.
 Known limitations (see also the Hermes tools docs):
 
 * No file synchronization. ``~/.hermes`` credentials, skills, and cache are
-  **not** present in the pod, so credential-dependent skills will fail there.
+  **not** present in the pod, so a skill that reads its credential from a file
+  will fail there. Credentials that travel as *environment* variables do work:
+  ``k8s_env`` and ``k8s_forward_env`` are injected, as is skill-registered
+  passthrough.
+* Forwarded values reach the pod as ``export`` statements inside the
+  ``bash -c`` argument, because ``kubectl exec`` has no ``docker exec -e``
+  equivalent. They are therefore visible in the pod's own process list for the
+  life of the command — a wider exposure than Docker's, though the session
+  snapshot already persists the same values to the pod's filesystem.
 * ``terminal.cwd`` is pod-local. The host working tree is neither mounted nor
   synced, so a command can succeed in the pod while the host checkout is
   untouched.
@@ -35,6 +43,12 @@ import shutil
 import subprocess
 
 from tools.environments.base import BaseEnvironment, _popen_bash
+from tools.environments.env_forwarding import (
+    export_prelude,
+    normalize_env_dict,
+    normalize_forward_env_names,
+    resolve_passthrough_env,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +112,16 @@ class KubernetesEnvironment(BaseEnvironment):
     via in-band stdout markers, both handled by :class:`BaseEnvironment`.
     """
 
+    # One pod per task id — the name does not encode the profile, so a single
+    # pod can be shared by several routed profiles in one gateway process.
+    # Profile-scoped values therefore must never persist in the snapshot; they
+    # are re-injected per command instead.
+    _profile_scoped_passthrough = True
+
+    def _additional_profile_scoped_passthrough_names(self) -> tuple:
+        """Keep explicitly forwarded values out of the shared snapshot."""
+        return tuple(self._forward_env)
+
     def __init__(
         self,
         image: str,
@@ -113,6 +137,8 @@ class KubernetesEnvironment(BaseEnvironment):
         persistent_filesystem: bool = True,
         pod_ready_timeout: int = 120,
         extra_args: list | None = None,
+        forward_env: list | None = None,
+        env: dict | None = None,
     ):
         if not cwd or cwd == "~":
             cwd = DEFAULT_WORKSPACE
@@ -128,6 +154,10 @@ class KubernetesEnvironment(BaseEnvironment):
         self._task_id = task_id or "default"
         self._persistent = persistent_filesystem
         self._pod_ready_timeout = max(1, int(pod_ready_timeout or 120))
+        self._forward_env = normalize_forward_env_names(
+            forward_env, config_key="k8s_forward_env"
+        )
+        self._env = normalize_env_dict(env, config_key="k8s_env")
 
         # Extra args are appended to every kubectl invocation. Tolerate a
         # malformed config.yaml value rather than crashing every command.
@@ -401,6 +431,31 @@ class KubernetesEnvironment(BaseEnvironment):
     # Execution
     # ------------------------------------------------------------------
 
+    def _build_env_prelude(self, *, login: bool) -> str:
+        """Render the ``export``/``unset`` lines to prepend to a command.
+
+        ``kubectl exec`` has no equivalent of ``docker exec -e``, so forwarded
+        variables have to travel as shell text inside the command itself.
+
+        On the init (login) call this carries everything — configured ``k8s_env``
+        plus resolved passthrough — so ``export -p`` folds it into the session
+        snapshot and later commands inherit it for free. Afterwards only the
+        profile-scoped values are re-sent, because the pod can be shared by
+        several routed profiles and those values must not be the snapshot's.
+        """
+        if login:
+            exec_env = dict(self._env)
+            passthrough, unset_names = resolve_passthrough_env(self._forward_env)
+            exec_env.update(passthrough)
+            for name in unset_names:
+                exec_env.pop(name, None)
+            return export_prelude(exec_env, unset_names)
+
+        if not self._profile_scoped_passthrough:
+            return ""
+        passthrough, unset_names = resolve_passthrough_env(self._forward_env)
+        return export_prelude(passthrough, unset_names)
+
     def _run_bash(self, cmd_string: str, *, login: bool = False,
                   timeout: int = 120,
                   stdin_data: str | None = None) -> subprocess.Popen:
@@ -411,6 +466,10 @@ class KubernetesEnvironment(BaseEnvironment):
         ``kubectl exec -- bash -c`` execs the argv array directly, so quoting
         would make bash run the literal quoted text.
         """
+        prelude = self._build_env_prelude(login=login)
+        if prelude:
+            cmd_string = prelude + cmd_string
+
         cmd = self._base_kubectl_cmd() + [
             "exec", "-i", self._pod, "-c", POD_CONTAINER_NAME, "--",
         ]
