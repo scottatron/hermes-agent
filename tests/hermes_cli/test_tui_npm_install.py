@@ -1,5 +1,6 @@
 """_tui_need_npm_install: auto npm when node_modules is behind the lockfile."""
 
+import json
 import os
 import types
 from pathlib import Path
@@ -176,3 +177,48 @@ def test_make_tui_argv_omits_workspace_when_tui_has_own_lockfile(
     assert install_cmd[:2] == ["/bin/npm", "install"]
     # cwd must be tui_dir (standalone), not parent
     assert calls[0][1]["cwd"] == str(tui_dir)
+
+
+def test_aube_state_skips_repeated_tui_install(main_mod, tmp_path: Path) -> None:
+    """aube's state marker replaces npm's hidden lockfile freshness check."""
+    root = tmp_path
+    tui_dir = root / "ui-tui"
+    tui_dir.mkdir()
+    (tui_dir / "package.json").write_text("{}", encoding="utf-8")
+    (root / "package.json").write_text("{}", encoding="utf-8")
+    (root / "package-lock.json").write_text("{}", encoding="utf-8")
+    _touch_ink(root)
+
+    package_stat = (root / "package.json").stat()
+    state_dir = root / "node_modules" / ".aube-state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "lockfile_snapshot_name": "package-lock.json",
+                "package_json_meta": {
+                    ".": {
+                        "size": package_stat.st_size,
+                        "mtime_secs": package_stat.st_mtime_ns // 1_000_000_000,
+                        "mtime_nanos": package_stat.st_mtime_ns % 1_000_000_000,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "fresh.json").write_text("{}", encoding="utf-8")
+
+    assert main_mod._tui_need_npm_install(tui_dir) is False
+
+    (root / "package.json").write_text('{"dependencies": {"new": "1.0.0"}}', encoding="utf-8")
+    assert main_mod._tui_need_npm_install(tui_dir) is True
+
+
+def test_aube_install_args_translate_workspace_scope(main_mod, tmp_path: Path) -> None:
+    (tmp_path / "web").mkdir()
+    args = main_mod._aube_install_args(
+        tmp_path,
+        ("--workspace", "web", "--silent", "--include=dev", "--prefer-offline"),
+    )
+    assert args == ["--filter", "./web...", "--silent", "--prefer-offline"]
