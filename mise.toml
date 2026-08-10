@@ -1,10 +1,10 @@
 [deps.uv]
 [deps.aube]
-[deps]
-disable = ["npm"]
 
 [tools]
 aube = "latest"
+node = "26"
+python = "3.11"
 uv = "latest"
 
 [tasks.build-core]
@@ -12,17 +12,21 @@ description = "Build Hermes core"
 dir = "{{config_root}}"
 run = "uv sync --extra hindsight --extra slack --extra web"
 
+[tasks.symlink-core-bin]
+description = "Symlink hermes bin into ~/.local/bin"
+run = "ln -fs {{config_root}}/.venv/bin/hermes {{env.HOME}}/.local/bin/hermes"
+
 [tasks.build-desktop]
 description = "Build Desktop app"
 dir = "{{config_root}}/apps/desktop"
-run = "aube run pack"
+run = "aube run --no-install pack"
 
 [tasks.build-tui]
 description = "Build TUI"
 dir = "{{config_root}}/ui-tui"
-run = "aube run build"
+run = "aube run --no-install build"
 
 [tasks.build-web]
 description = "Build web dashboard"
 dir = "{{config_root}}/web"
-run = "aube run build"
+run = "aube run --no-install build"
