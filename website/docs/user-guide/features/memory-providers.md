@@ -432,7 +432,7 @@ hermes config set memory.provider hindsight
 echo "HINDSIGHT_API_KEY=your-key" >> ~/.hermes/.env
 ```
 
-The setup wizard installs only what the selected mode needs (`hindsight-client` for cloud or local-external; `hindsight-all` plus the exact client constraint for local-embedded). Requires `hindsight-client==0.8.5` (re-pinned to that reviewed version on session start if a different version is installed).
+The setup wizard installs only what the selected mode needs (`hindsight-client` for cloud or local-external; `hindsight-all` plus the exact client constraint for local-embedded). Requires `hindsight-client==0.9.0` (re-pinned to that reviewed version on session start if a different version is installed).
 
 **Local mode UI:** `hindsight-embed -p hermes ui start`
 

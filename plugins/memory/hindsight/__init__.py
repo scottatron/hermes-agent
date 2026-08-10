@@ -73,7 +73,7 @@ _DEFAULT_LOCAL_URL = "http://localhost:8888"
 # Keep in sync with the [hindsight] extra in pyproject.toml, tools/lazy_deps.py
 # ("memory.hindsight"), and plugin.yaml. tests/test_packaging_metadata.py
 # enforces the four-way lockstep without importing this provider.
-_PINNED_CLIENT_VERSION = "0.8.5"
+_PINNED_CLIENT_VERSION = "0.9.0"
 _CLIENT_REQUIREMENT = f"hindsight-client=={_PINNED_CLIENT_VERSION}"
 _DEFAULT_TIMEOUT = 120  # seconds — cloud API can take 30-40s per request
 _DEFAULT_IDLE_TIMEOUT = 300  # seconds — Hindsight embedded daemon default
