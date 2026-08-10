@@ -6,9 +6,9 @@ fake-provider pattern from ``test_daytona_environment.py`` is adapted: every
 and recorded so tests can assert on the exact argv.
 """
 
+import io
 import json
 import subprocess
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -113,15 +113,18 @@ def make_env(kubectl, monkeypatch):
 def _make_proc(output="", returncode=0):
     """A minimal ProcessHandle-compatible stand-in for a kubectl exec."""
     proc = MagicMock()
-    proc.stdout = SimpleNamespace(
-        fileno=MagicMock(side_effect=OSError("no fd")),
-        read=MagicMock(return_value=output),
-        __iter__=lambda self: iter([output] if output else []),
-        close=MagicMock(),
-    )
+    # A real file object, not a namespace with an ``__iter__`` attribute:
+    # ``_wait_for_process`` drains stdout with ``for piece in stream``, and
+    # dunder lookup goes through the type, so an instance attribute is never
+    # consulted and the output silently comes back empty. StringIO.fileno()
+    # raises, which is exactly what routes the drain down the iterable path.
+    proc.stdout = io.StringIO(output)
     proc.poll.return_value = returncode
     proc.returncode = returncode
     proc.wait.return_value = returncode
+    # _wait_for_process appends any stdin-pipe errors to the output; on a bare
+    # MagicMock that attribute auto-creates as truthy and replaces the output.
+    proc._hermes_stdin_errors = []
     return proc
 
 
@@ -350,6 +353,121 @@ class TestCwd:
             {"output": f"hi\n{marker}/tmp/newdir{marker}\n", "returncode": 0}
         )
         assert env.cwd == "/tmp/newdir"
+
+
+# ---------------------------------------------------------------------------
+# Recovery from a vanished pod
+# ---------------------------------------------------------------------------
+
+class TestPodRecovery:
+    """A pod can disappear mid-session; without recovery every later command
+    in the task fails forever."""
+
+    @staticmethod
+    def _script(monkeypatch, *procs):
+        """Serve *procs* to successive _popen_bash calls, then clean exits.
+
+        Installed after construction so the constructor's own init_session()
+        does not eat the first scripted entry.
+        """
+        queue = list(procs)
+
+        def _fake_popen(cmd, stdin_data=None, **kwargs):
+            return queue.pop(0) if queue else _make_proc()
+
+        monkeypatch.setattr(f"{MODULE}._popen_bash", _fake_popen)
+
+    def test_recreates_pod_and_retries(self, make_env, kubectl, monkeypatch):
+        env = make_env(task_id="t1")
+        gone = _make_proc(
+            output=f'Error from server (NotFound): pods "{env._pod}" not found',
+            returncode=1,
+        )
+        self._script(monkeypatch, gone, _make_proc(), _make_proc("ok", 0))
+        # The pod is really gone, so the API-server confirmation agrees.
+        kubectl.pod_phase = ""
+        kubectl.calls.clear()
+
+        result = env.execute("echo hi")
+
+        assert kubectl.calls_with("apply"), "pod was not recreated"
+        assert result["returncode"] == 0
+        assert "ok" in result["output"]
+
+    def test_no_recovery_when_pod_is_still_running(self, make_env, kubectl,
+                                                   monkeypatch):
+        """The message only nominates a candidate — the API server decides.
+
+        Recreating a pod that is alive would delete a live session's pod.
+        """
+        env = make_env(task_id="t1")
+        self._script(
+            monkeypatch,
+            _make_proc(
+                output=f'Error from server (NotFound): pods "{env._pod}" not found',
+                returncode=1,
+            ),
+        )
+        kubectl.pod_phase = "Running"
+        kubectl.calls.clear()
+
+        result = env.execute("echo hi")
+
+        assert kubectl.calls_with("apply") == []
+        assert result["returncode"] == 1
+
+    def test_ordinary_failure_does_not_touch_the_cluster(self, make_env, kubectl,
+                                                         monkeypatch):
+        """`command not found` is the most common failing command there is.
+
+        A bare "not found" substring check would recreate the pod on every one.
+        """
+        env = make_env(task_id="t1")
+        self._script(
+            monkeypatch,
+            _make_proc(output="bash: frobnicate: command not found", returncode=127),
+        )
+        kubectl.calls.clear()
+
+        result = env.execute("frobnicate")
+
+        assert result["returncode"] == 127
+        # Not even the phase lookup should fire: the cheap check gates it.
+        assert kubectl.cluster_calls() == []
+
+    def test_failed_recreation_surfaces_the_original_error(self, make_env, kubectl,
+                                                           monkeypatch):
+        env = make_env(task_id="t1")
+        message = f'Error from server (NotFound): pods "{env._pod}" not found'
+        self._script(monkeypatch, _make_proc(output=message, returncode=1))
+        kubectl.pod_phase = ""
+        kubectl.responses["apply"] = _completed(returncode=1, stderr="quota exceeded")
+        kubectl.calls.clear()
+
+        result = env.execute("echo hi")
+
+        assert result["returncode"] == 1
+        assert message in result["output"]
+
+    @pytest.mark.parametrize("message", [
+        'Error from server (NotFound): pods "{pod}" not found',
+        "error: cannot exec into a container in a completed pod; "
+        "current phase is Failed",
+        "error: unable to upgrade connection: container not found (\"hermes\")",
+        "Error from server (BadRequest): pod {pod} does not have a host assigned",
+    ])
+    def test_recognized_kubectl_messages(self, make_env, message):
+        env = make_env(task_id="t1")
+        assert env._looks_like_pod_gone(message.format(pod=env._pod))
+
+    @pytest.mark.parametrize("message", [
+        "bash: frobnicate: command not found",
+        "ls: cannot access 'x': No such file or directory",
+        'pods "hermes-someothertask" not found',
+    ])
+    def test_unrelated_messages_are_ignored(self, make_env, message):
+        env = make_env(task_id="t1")
+        assert not env._looks_like_pod_gone(message)
 
 
 # ---------------------------------------------------------------------------

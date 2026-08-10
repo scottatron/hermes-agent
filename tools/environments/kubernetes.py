@@ -16,7 +16,9 @@ Known limitations (see also the Hermes tools docs):
   synced, so a command can succeed in the pod while the host checkout is
   untouched.
 * The workspace is an ``emptyDir`` and dies with the pod.
-  ``container_persistent`` only keeps the *pod* alive; it is not a PVC.
+  ``container_persistent`` only keeps the *pod* alive; it is not a PVC. A pod
+  that vanishes mid-session (eviction, node drain, OOM kill) is recreated
+  transparently on the next command, but the workspace it held is gone.
 * PTY mode is unsupported (the terminal schema already restricts it to
   local/SSH).
 * Cancellation kills the local ``kubectl`` client, not the in-pod process tree.
@@ -310,6 +312,90 @@ class KubernetesEnvironment(BaseEnvironment):
             )
         except (OSError, subprocess.SubprocessError) as exc:
             logger.warning("Kubernetes: failed to delete pod %s: %s", self._pod, exc)
+
+    # ------------------------------------------------------------------
+    # Recovery from a pod that vanished mid-session
+    # ------------------------------------------------------------------
+
+    # kubectl's ways of saying "the pod you asked to exec into isn't there".
+    # Every pattern is either pod-name-scoped or specific enough that the
+    # executed command's own output cannot produce it: matching a bare
+    # "not found" would fire on `bash: foo: command not found`, which is the
+    # single most common failing command there is.
+    _POD_GONE_PATTERNS = (
+        'pods "{pod}" not found',
+        "pod {pod} does not exist",
+        "cannot exec into a container in a completed pod",
+        "cannot exec into a container in a terminated pod",
+        "unable to upgrade connection: container not found",
+        "does not have a host assigned",
+    )
+
+    def _looks_like_pod_gone(self, output: str) -> bool:
+        return any(
+            pattern.format(pod=self._pod) in output
+            for pattern in self._POD_GONE_PATTERNS
+        )
+
+    def _recover_pod(self) -> bool:
+        """Recreate the pod after it disappeared out-of-band.
+
+        ``_ensure_pod`` already covers every state the pod can be found in —
+        absent, Pending, or terminal — so recovery is just re-running it under
+        the same deterministic name. Returns False when recreation fails, so
+        the caller can surface the original error rather than a second one.
+        """
+        logger.warning(
+            "Kubernetes: pod %s/%s is gone — recreating it. Its workspace was "
+            "an emptyDir, so files written by earlier commands in this session "
+            "are not coming back.",
+            self._namespace, self._pod,
+        )
+        try:
+            self._ensure_pod()
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            logger.error("Kubernetes: pod recovery failed: %s", exc)
+            return False
+
+        # The env snapshot lived on the dead pod's filesystem; rebuild it so
+        # later commands don't silently fall back to `bash -l`.
+        try:
+            self._snapshot_ready = False
+            self.init_session()
+        except Exception as exc:
+            logger.error(
+                "Kubernetes: init_session failed in the recreated pod: %s", exc
+            )
+            return False
+
+        logger.info("Kubernetes: recovered onto pod %s/%s", self._namespace, self._pod)
+        return True
+
+    def execute(self, command: str, cwd: str = "", **kwargs) -> dict:
+        """Execute a command, recovering once from a pod that went away.
+
+        Eviction, a node drain, an OOM kill, or an out-of-band
+        ``kubectl delete`` all leave the session pointed at a pod that no
+        longer accepts exec, and without this every subsequent command in the
+        task fails forever. Recovery restores the ability to run commands; it
+        cannot restore the workspace (see the module docstring on emptyDir).
+        """
+        result = super().execute(command, cwd, **kwargs)
+        if result.get("returncode", 0) == 0:
+            return result
+        if not self._looks_like_pod_gone(result.get("output", "")):
+            return result
+
+        # The message only nominates a candidate — the API server is the
+        # authority. A pod that is still Running means the text came from
+        # somewhere else (a nested kubectl, a log the command printed), and
+        # recreating it would delete a live session's pod out from under it.
+        if self._pod_phase() == "Running":
+            return result
+
+        if not self._recover_pod():
+            return result
+        return super().execute(command, cwd, **kwargs)
 
     # ------------------------------------------------------------------
     # Execution
