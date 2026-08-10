@@ -1684,9 +1684,46 @@ def _aube_state_is_current(project_root: Path) -> bool:
         return False
 
 
+def _aube_linker_is_current(project_root: Path) -> bool:
+    """Return whether a modern aube symlink tree predates no project inputs.
+
+    Recent aube versions use ``node_modules/.aube`` plus the repository's
+    ``aube-lock.yaml`` rather than the older ``.aube-state/state.json``
+    freshness record.  The linker directory's mtime is a useful install
+    generation marker: if a manifest or aube lockfile changed afterwards,
+    let the normal install path refresh the tree.
+    """
+    linker = project_root / "node_modules" / ".aube"
+    lockfile = project_root / "aube-lock.yaml"
+    if not linker.is_dir() or not lockfile.is_file():
+        return False
+
+    try:
+        installed_at = linker.stat().st_mtime_ns
+        if lockfile.stat().st_mtime_ns > installed_at:
+            return False
+
+        manifest_paths = [project_root / "package.json"]
+        for workspace_root in ("apps", "ui-tui", "web", "tests-js"):
+            workspace_dir = project_root / workspace_root
+            if workspace_dir.is_dir():
+                manifest_paths.extend(
+                    path
+                    for path in workspace_dir.glob("**/package.json")
+                    if path.is_file()
+                )
+        return all(path.stat().st_mtime_ns <= installed_at for path in manifest_paths)
+    except OSError:
+        return False
+
+
 def _project_uses_aube(project_root: Path) -> bool:
     """Return whether *project_root* opts into the aube install layout."""
-    if (project_root / "node_modules" / ".aube-state").is_dir():
+    if (
+        (project_root / "node_modules" / ".aube-state").is_dir()
+        or (project_root / "node_modules" / ".aube").is_dir()
+        or (project_root / "aube-lock.yaml").is_file()
+    ):
         return True
     try:
         manifest = json.loads((project_root / "package.json").read_text(encoding="utf-8"))
@@ -1761,8 +1798,11 @@ def _tui_need_npm_install(root: Path) -> bool:
     if entry.is_file() and not lock.is_file():
         return False
 
-    ink = ws_root / "node_modules" / "@hermes" / "ink" / "package.json"
-    if not ink.is_file():
+    ink_candidates = [
+        ws_root / "node_modules" / "@hermes" / "ink" / "package.json",
+        root / "node_modules" / "@hermes" / "ink" / "package.json",
+    ]
+    if not any(path.is_file() for path in ink_candidates):
         return True
     if not lock.is_file():
         return False
@@ -1773,6 +1813,8 @@ def _tui_need_npm_install(root: Path) -> bool:
     # banner on every TUI launch even when the bundle is perfectly runnable.
     if (ws_root / "node_modules" / ".aube-state").is_dir():
         return not _aube_state_is_current(ws_root)
+    if (ws_root / "node_modules" / ".aube").is_dir():
+        return not _aube_linker_is_current(ws_root)
 
     marker = ws_root / "node_modules" / ".package-lock.json"
     if not marker.is_file():

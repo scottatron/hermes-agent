@@ -215,6 +215,32 @@ def test_aube_state_skips_repeated_tui_install(main_mod, tmp_path: Path) -> None
     assert main_mod._tui_need_npm_install(tui_dir) is True
 
 
+def test_modern_aube_linker_skips_repeated_tui_install(main_mod, tmp_path: Path) -> None:
+    """Modern aube uses .aube plus aube-lock.yaml, not .aube-state."""
+    root = tmp_path
+    tui_dir = root / "ui-tui"
+    tui_dir.mkdir()
+    (tui_dir / "package.json").write_text("{}", encoding="utf-8")
+    (root / "package.json").write_text("{}", encoding="utf-8")
+    (root / "package-lock.json").write_text("{}", encoding="utf-8")
+    (root / "aube-lock.yaml").write_text("lockfileVersion: 9\n", encoding="utf-8")
+    _touch_ink(tui_dir)
+
+    linker = root / "node_modules" / ".aube"
+    linker.mkdir(parents=True)
+    linker_mtime = max(
+        (root / "package.json").stat().st_mtime_ns,
+        (tui_dir / "package.json").stat().st_mtime_ns,
+        (root / "aube-lock.yaml").stat().st_mtime_ns,
+    ) + 1_000_000
+    os.utime(linker, ns=(linker_mtime, linker_mtime))
+
+    assert main_mod._tui_need_npm_install(tui_dir) is False
+
+    (root / "aube-lock.yaml").write_text("lockfileVersion: 9\nchanged: true\n", encoding="utf-8")
+    assert main_mod._tui_need_npm_install(tui_dir) is True
+
+
 def test_aube_install_args_translate_workspace_scope(main_mod, tmp_path: Path) -> None:
     (tmp_path / "web").mkdir()
     args = main_mod._aube_install_args(
