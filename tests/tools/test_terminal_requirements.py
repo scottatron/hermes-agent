@@ -1,5 +1,6 @@
 import importlib
 import logging
+import subprocess
 
 import pytest
 
@@ -23,6 +24,11 @@ def _clear_terminal_env(monkeypatch):
         "TERMINAL_SSH_USER",
         "TERMINAL_TIMEOUT",
         "TERMINAL_VERCEL_RUNTIME",
+        "TERMINAL_K8S_NAMESPACE",
+        "TERMINAL_K8S_CONTEXT",
+        "TERMINAL_K8S_KUBECONFIG",
+        "TERMINAL_K8S_EXTRA_ARGS",
+        "TERMINAL_K8S_POD_READY_TIMEOUT",
         "MODAL_TOKEN_ID",
         "MODAL_TOKEN_SECRET",
         "VERCEL_OIDC_TOKEN",
@@ -206,3 +212,87 @@ def test_vercel_backend_rejects_malformed_disk_without_raising(monkeypatch, capl
         "Invalid value for TERMINAL_CONTAINER_DISK" in record.getMessage()
         for record in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# Kubernetes backend
+# ---------------------------------------------------------------------------
+
+def _stub_kubectl(monkeypatch, *, present=True, version_rc=0, can_i="yes",
+                  can_i_raises=False):
+    """Stub kubectl discovery and both subprocess probes; return recorded calls."""
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        terminal_tool_module.shutil, "which",
+        lambda name: "/usr/bin/kubectl" if (present and name == "kubectl") else None,
+    )
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if "version" in cmd:
+            return subprocess.CompletedProcess(cmd, version_rc, "", "client error")
+        if can_i_raises:
+            raise OSError("no cluster")
+        return subprocess.CompletedProcess(cmd, 0, can_i, "")
+
+    monkeypatch.setattr(terminal_tool_module.subprocess, "run", _fake_run)
+    return calls
+
+
+def test_kubernetes_backend_requires_kubectl(monkeypatch, caplog):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "kubernetes")
+    _stub_kubectl(monkeypatch, present=False)
+
+    with caplog.at_level(logging.ERROR):
+        ok = terminal_tool_module.check_terminal_requirements()
+
+    assert ok is False
+    assert any("kubectl not found in PATH" in r.getMessage() for r in caplog.records)
+
+
+def test_kubernetes_backend_rejects_broken_client(monkeypatch, caplog):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "kubernetes")
+    _stub_kubectl(monkeypatch, version_rc=1)
+
+    with caplog.at_level(logging.ERROR):
+        ok = terminal_tool_module.check_terminal_requirements()
+
+    assert ok is False
+    assert any("kubectl version --client" in r.getMessage() for r in caplog.records)
+
+
+def test_kubernetes_backend_accepts_permitted_namespace(monkeypatch):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "kubernetes")
+    monkeypatch.setenv("TERMINAL_K8S_NAMESPACE", "agents")
+    calls = _stub_kubectl(monkeypatch, can_i="yes")
+
+    assert terminal_tool_module.check_terminal_requirements() is True
+
+    auth = next(c for c in calls if "can-i" in c)
+    assert auth[-2:] == ["--namespace", "agents"]
+
+
+def test_kubernetes_backend_rejects_denied_rbac(monkeypatch, caplog):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "kubernetes")
+    _stub_kubectl(monkeypatch, can_i="no")
+
+    with caplog.at_level(logging.ERROR):
+        ok = terminal_tool_module.check_terminal_requirements()
+
+    assert ok is False
+    assert any("cannot " in r.getMessage() and "create pods" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_kubernetes_backend_tolerates_unreachable_cluster(monkeypatch):
+    """An unreachable API server is not a hard 'no' — let pod creation report it."""
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "kubernetes")
+    _stub_kubectl(monkeypatch, can_i_raises=True)
+
+    assert terminal_tool_module.check_terminal_requirements() is True

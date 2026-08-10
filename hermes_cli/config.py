@@ -3236,6 +3236,13 @@ TERMINAL_CONFIG_ENV_MAP = {
     "modal_image": "TERMINAL_MODAL_IMAGE",
     "daytona_image": "TERMINAL_DAYTONA_IMAGE",
     "vercel_runtime": "TERMINAL_VERCEL_RUNTIME",
+    "k8s_image": "TERMINAL_K8S_IMAGE",
+    "k8s_namespace": "TERMINAL_K8S_NAMESPACE",
+    "k8s_context": "TERMINAL_K8S_CONTEXT",
+    "k8s_kubeconfig": "TERMINAL_K8S_KUBECONFIG",
+    "k8s_service_account": "TERMINAL_K8S_SERVICE_ACCOUNT",
+    "k8s_pod_ready_timeout": "TERMINAL_K8S_POD_READY_TIMEOUT",
+    "k8s_extra_args": "TERMINAL_K8S_EXTRA_ARGS",
     "ssh_host": "TERMINAL_SSH_HOST",
     "ssh_user": "TERMINAL_SSH_USER",
     "ssh_port": "TERMINAL_SSH_PORT",
@@ -4432,6 +4439,10 @@ def show_config():
     elif terminal.get('backend') == 'vercel_sandbox':
         print(f"  Vercel runtime: {terminal.get('vercel_runtime', 'node24')}")
         print(f"  Vercel auth:    {'configured' if get_env_value('VERCEL_OIDC_TOKEN') or (get_env_value('VERCEL_TOKEN') and get_env_value('VERCEL_PROJECT_ID') and get_env_value('VERCEL_TEAM_ID')) else '(not set)'}")
+    elif terminal.get('backend') == 'kubernetes':
+        print(f"  K8s image:    {terminal.get('k8s_image', 'nikolaik/python-nodejs:python3.11-nodejs20')}")
+        print(f"  Namespace:    {terminal.get('k8s_namespace', 'default')}")
+        print(f"  Context:      {terminal.get('k8s_context') or '(current-context)'}")
     elif terminal.get('backend') == 'ssh':
         ssh_host = get_env_value('TERMINAL_SSH_HOST')
         ssh_user = get_env_value('TERMINAL_SSH_USER')

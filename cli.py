@@ -454,6 +454,8 @@ def load_cli_config() -> Dict[str, Any]:
             "singularity_image": "docker://nikolaik/python-nodejs:python3.11-nodejs20",
             "modal_image": "nikolaik/python-nodejs:python3.11-nodejs20",
             "daytona_image": "nikolaik/python-nodejs:python3.11-nodejs20",
+            "k8s_image": "nikolaik/python-nodejs:python3.11-nodejs20",
+            "k8s_namespace": "default",
             "docker_volumes": [],  # host:container volume mounts for Docker backend
             "docker_mount_cwd_to_workspace": False,  # explicit opt-in only; default off for sandbox isolation
         },
@@ -669,12 +671,21 @@ def load_cli_config() -> Dict[str, Any]:
         "modal_image": "TERMINAL_MODAL_IMAGE",
         "daytona_image": "TERMINAL_DAYTONA_IMAGE",
         "vercel_runtime": "TERMINAL_VERCEL_RUNTIME",
+        # Kubernetes config
+        "k8s_image": "TERMINAL_K8S_IMAGE",
+        "k8s_namespace": "TERMINAL_K8S_NAMESPACE",
+        "k8s_context": "TERMINAL_K8S_CONTEXT",
+        "k8s_kubeconfig": "TERMINAL_K8S_KUBECONFIG",
+        "k8s_service_account": "TERMINAL_K8S_SERVICE_ACCOUNT",
+        "k8s_pod_ready_timeout": "TERMINAL_K8S_POD_READY_TIMEOUT",
+        "k8s_extra_args": "TERMINAL_K8S_EXTRA_ARGS",
         # SSH config
         "ssh_host": "TERMINAL_SSH_HOST",
         "ssh_user": "TERMINAL_SSH_USER",
         "ssh_port": "TERMINAL_SSH_PORT",
         "ssh_key": "TERMINAL_SSH_KEY",
-        # Container resource config (docker, singularity, modal, daytona, vercel_sandbox -- ignored for local/ssh)
+        # Container resource config (docker, singularity, modal, daytona,
+        # vercel_sandbox, kubernetes -- ignored for local/ssh)
         "container_cpu": "TERMINAL_CONTAINER_CPU",
         "container_memory": "TERMINAL_CONTAINER_MEMORY",
         "container_disk": "TERMINAL_CONTAINER_DISK",

@@ -131,6 +131,8 @@ DISK_USAGE_WARNING_THRESHOLD_GB = _safe_parse_import_env(
     "number",
 )
 _VERCEL_SANDBOX_DEFAULT_CWD = "/vercel/sandbox"
+# The Kubernetes backend mounts an emptyDir here inside the managed pod.
+_K8S_DEFAULT_CWD = "/workspace"
 _SUPPORTED_VERCEL_RUNTIMES = ("node24", "node22", "python3.13")
 
 
@@ -194,6 +196,90 @@ def _check_vercel_sandbox_requirements(config: dict[str, Any]) -> bool:
         "development only."
     )
     return False
+
+
+def k8s_container_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Return the Kubernetes slice of a ``container_config`` payload.
+
+    This module builds ``container_config`` through
+    :func:`_container_config_from_config`, but ``tools/file_tools.py``,
+    ``tools/code_execution_tool.py``, and ``agent/prompt_builder.py`` still
+    assemble their own dicts, each carrying a different subset of the Docker
+    keys.  Funnelling the Kubernetes keys through one helper keeps all four
+    from drifting apart — a missing key here silently falls back to the
+    ``default`` namespace instead of the configured one.
+    """
+    return {
+        "k8s_namespace": config.get("k8s_namespace", "default"),
+        "k8s_context": config.get("k8s_context", ""),
+        "k8s_kubeconfig": config.get("k8s_kubeconfig", ""),
+        "k8s_service_account": config.get("k8s_service_account", ""),
+        "k8s_pod_ready_timeout": config.get("k8s_pod_ready_timeout", 120),
+        "k8s_extra_args": config.get("k8s_extra_args", []),
+    }
+
+
+def _check_kubernetes_requirements(config: dict[str, Any]) -> bool:
+    """Validate the Kubernetes terminal backend before any pod is created.
+
+    Checks kubectl presence, that the client runs, and that the current
+    credentials may create pods in the configured namespace.  ``kubectl auth
+    can-i`` failing to *run* (offline, no cluster) is not treated as a hard
+    "no" — only an explicit ``no`` is — so an unreachable API server surfaces
+    as a normal connection error at pod creation with a real message.
+    """
+    kubectl = shutil.which("kubectl")
+    if not kubectl:
+        logger.error(
+            "kubectl not found in PATH. Install it from "
+            "https://kubernetes.io/docs/tasks/tools/ or switch TERMINAL_ENV "
+            "to another backend."
+        )
+        return False
+
+    try:
+        result = subprocess.run(
+            [kubectl, "version", "--client"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=15, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.error("'kubectl version --client' could not be run: %s", exc)
+        return False
+    if result.returncode != 0:
+        logger.error(
+            "'kubectl version --client' failed: %s",
+            (result.stderr or result.stdout).strip(),
+        )
+        return False
+
+    namespace = config.get("k8s_namespace") or "default"
+    cmd = [kubectl, "auth", "can-i", "create", "pods", "--namespace", namespace]
+    if config.get("k8s_context"):
+        cmd.extend(["--context", config["k8s_context"]])
+    if config.get("k8s_kubeconfig"):
+        cmd.extend(["--kubeconfig", config["k8s_kubeconfig"]])
+    try:
+        auth = subprocess.run(
+            cmd,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=20, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("Could not verify Kubernetes RBAC (%s); continuing.", exc)
+        return True
+
+    if (auth.stdout or "").strip().lower() == "no":
+        logger.error(
+            "Kubernetes backend selected but the current credentials cannot "
+            "create pods in namespace %r. Required RBAC: pods "
+            "(create/get/delete), pods/exec (create), pods/log (get), "
+            "events (list).",
+            namespace,
+        )
+        return False
+
+    return True
 
 
 # Cache for disk usage warning to avoid full rglob scan on every call.
@@ -1305,7 +1391,7 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
     """
     _ISOLATION_KEYS = frozenset({
         "docker_image", "modal_image", "singularity_image",
-        "daytona_image", "env_type",
+        "daytona_image", "k8s_image", "env_type",
     })
     if task_id and task_id in _task_env_overrides:
         overrides = _task_env_overrides[task_id]
@@ -1372,7 +1458,9 @@ def _safe_getcwd() -> str:
 # cwd looks when it leaks toward a Linux container's ``-w`` flag.
 _HOST_CWD_PREFIXES = ("/Users/", "/home/", "C:\\", "C:/")
 
-_CONTAINER_BACKENDS = frozenset({"docker", "singularity", "modal", "daytona", "vercel_sandbox"})
+_CONTAINER_BACKENDS = frozenset({
+    "docker", "singularity", "modal", "daytona", "vercel_sandbox", "kubernetes",
+})
 
 
 def _is_unusable_container_cwd(cwd: str) -> bool:
@@ -1458,8 +1546,15 @@ def _get_env_config() -> Dict[str, Any]:
     env_type = os.getenv("TERMINAL_ENV", "local")
     
     mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in {"true", "1", "yes"}
-    container_backend = env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}
+    container_backend = env_type in _CONTAINER_BACKENDS
     docker_backend = env_type == "docker"
+
+    if env_type == "kubernetes":
+        k8s_extra_args = _parse_env_var("TERMINAL_K8S_EXTRA_ARGS", "[]", json.loads, "valid JSON")
+        k8s_pod_ready_timeout = _parse_env_var("TERMINAL_K8S_POD_READY_TIMEOUT", "120")
+    else:
+        k8s_extra_args = []
+        k8s_pod_ready_timeout = 120
 
     # Docker/container-only env vars may be bridged from config.yaml even when
     # the active backend is local/ssh.  Do not parse their JSON/numeric payloads
@@ -1496,6 +1591,8 @@ def _get_env_config() -> Dict[str, Any]:
         default_cwd = "~"
     elif env_type == "vercel_sandbox":
         default_cwd = _VERCEL_SANDBOX_DEFAULT_CWD
+    elif env_type == "kubernetes":
+        default_cwd = _K8S_DEFAULT_CWD
     else:
         default_cwd = "/root"
 
@@ -1534,6 +1631,14 @@ def _get_env_config() -> Dict[str, Any]:
         "modal_image": os.getenv("TERMINAL_MODAL_IMAGE", default_image),
         "daytona_image": os.getenv("TERMINAL_DAYTONA_IMAGE", default_image),
         "vercel_runtime": os.getenv("TERMINAL_VERCEL_RUNTIME", "").strip(),
+        # Kubernetes-specific config (ignored by every other backend)
+        "k8s_image": os.getenv("TERMINAL_K8S_IMAGE", default_image),
+        "k8s_namespace": os.getenv("TERMINAL_K8S_NAMESPACE", "default"),
+        "k8s_context": os.getenv("TERMINAL_K8S_CONTEXT", ""),
+        "k8s_kubeconfig": os.getenv("TERMINAL_K8S_KUBECONFIG", ""),
+        "k8s_service_account": os.getenv("TERMINAL_K8S_SERVICE_ACCOUNT", ""),
+        "k8s_pod_ready_timeout": k8s_pod_ready_timeout,
+        "k8s_extra_args": k8s_extra_args,
         "cwd": cwd,
         "host_cwd": host_cwd,
         "docker_mount_cwd_to_workspace": mount_docker_cwd,
@@ -1631,6 +1736,7 @@ def _container_config_from_config(config: Dict[str, Any]) -> dict:
         "docker_network": config.get("docker_network", True),
         "docker_persist_across_processes": config.get("docker_persist_across_processes", True),
         "docker_orphan_reaper": config.get("docker_orphan_reaper", True),
+        **k8s_container_config(config),
     }
 
 
@@ -1783,6 +1889,24 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             task_id=task_id,
         )
 
+    elif env_type == "kubernetes":
+        # Lazy import to keep module import cheap and to let tests patch the
+        # kubectl plumbing before the class is loaded.
+        from tools.environments.kubernetes import (
+            KubernetesEnvironment as _KubernetesEnvironment,
+        )
+        return _KubernetesEnvironment(
+            image=image, cwd=cwd, timeout=timeout,
+            namespace=cc.get("k8s_namespace", "default"),
+            context=cc.get("k8s_context", ""),
+            kubeconfig=cc.get("k8s_kubeconfig", ""),
+            service_account=cc.get("k8s_service_account", ""),
+            cpu=cpu, memory=memory,
+            persistent_filesystem=persistent, task_id=task_id,
+            pod_ready_timeout=cc.get("k8s_pod_ready_timeout", 120),
+            extra_args=cc.get("k8s_extra_args", []),
+        )
+
     elif env_type == "ssh":
         if not ssh_config or not ssh_config.get("host") or not ssh_config.get("user"):
             raise ValueError("SSH environment requires ssh_host and ssh_user to be configured")
@@ -1798,7 +1922,8 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     else:
         raise ValueError(
             f"Unknown environment type: {env_type}. Use 'local', 'docker', "
-            f"'singularity', 'modal', 'daytona', 'vercel_sandbox', or 'ssh'"
+            f"'singularity', 'modal', 'daytona', 'vercel_sandbox', "
+            f"'kubernetes', or 'ssh'"
         )
 
 
@@ -1946,6 +2071,8 @@ def ensure_task_env(task_id: Optional[str] = None):
         image = overrides.get("modal_image") or config["modal_image"]
     elif env_type == "daytona":
         image = overrides.get("daytona_image") or config["daytona_image"]
+    elif env_type == "kubernetes":
+        image = overrides.get("k8s_image") or config["k8s_image"]
     else:
         image = ""
 
@@ -2435,6 +2562,8 @@ def terminal_tool(
             image = overrides.get("modal_image") or config["modal_image"]
         elif env_type == "daytona":
             image = overrides.get("daytona_image") or config["daytona_image"]
+        elif env_type == "kubernetes":
+            image = overrides.get("k8s_image") or config["k8s_image"]
         else:
             image = ""
 
@@ -3411,6 +3540,9 @@ def check_terminal_requirements() -> bool:
                 return result.returncode == 0
             return False
 
+        elif env_type == "kubernetes":
+            return _check_kubernetes_requirements(config)
+
         elif env_type == "ssh":
             if not config.get("ssh_host") or not config.get("ssh_user"):
                 logger.error(
@@ -3491,7 +3623,7 @@ def check_terminal_requirements() -> bool:
         else:
             logger.error(
                 "Unknown TERMINAL_ENV '%s'. Use one of: local, docker, singularity, "
-                "modal, daytona, vercel_sandbox, ssh.",
+                "modal, daytona, vercel_sandbox, kubernetes, ssh.",
                 env_type,
             )
             return False
@@ -3534,12 +3666,14 @@ if __name__ == "__main__":
     print(
         "  TERMINAL_ENV: "
         f"{os.getenv('TERMINAL_ENV', 'local')} "
-        "(local/docker/singularity/modal/daytona/vercel_sandbox/ssh)"
+        "(local/docker/singularity/modal/daytona/vercel_sandbox/kubernetes/ssh)"
     )
     print(f"  TERMINAL_DOCKER_IMAGE: {os.getenv('TERMINAL_DOCKER_IMAGE', default_img)}")
     print(f"  TERMINAL_SINGULARITY_IMAGE: {os.getenv('TERMINAL_SINGULARITY_IMAGE', f'docker://{default_img}')}")
     print(f"  TERMINAL_MODAL_IMAGE: {os.getenv('TERMINAL_MODAL_IMAGE', default_img)}")
     print(f"  TERMINAL_DAYTONA_IMAGE: {os.getenv('TERMINAL_DAYTONA_IMAGE', default_img)}")
+    print(f"  TERMINAL_K8S_IMAGE: {os.getenv('TERMINAL_K8S_IMAGE', default_img)}")
+    print(f"  TERMINAL_K8S_NAMESPACE: {os.getenv('TERMINAL_K8S_NAMESPACE', 'default')}")
     print(f"  TERMINAL_CWD: {os.getenv('TERMINAL_CWD', _safe_getcwd())}")
     from hermes_constants import display_hermes_home as _dhh
     print(f"  TERMINAL_SANDBOX_DIR: {os.getenv('TERMINAL_SANDBOX_DIR', f'{_dhh()}/sandboxes')}")

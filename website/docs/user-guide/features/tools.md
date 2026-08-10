@@ -66,13 +66,14 @@ The terminal tool can execute commands in different environments:
 | `modal` | Cloud execution | Serverless, scale |
 | `daytona` | Cloud sandbox workspace | Persistent remote dev environments |
 | `vercel_sandbox` | Vercel Sandbox cloud microVM | Cloud execution with snapshot-backed filesystem persistence |
+| `kubernetes` | Pod in a Kubernetes cluster | Cluster-side resource limits, RBAC, and node placement |
 
 ### Configuration
 
 ```yaml
 # In ~/.hermes/config.yaml
 terminal:
-  backend: local    # or: docker, ssh, singularity, modal, daytona, vercel_sandbox
+  backend: local    # or: docker, ssh, singularity, modal, daytona, vercel_sandbox, kubernetes
   cwd: "."          # Working directory
   timeout: 180      # Command timeout in seconds
 ```
@@ -177,13 +178,52 @@ Background terminal commands use Hermes' generic non-local process flow: spawn, 
 
 Leave `container_disk` unset or at the shared default `51200`; custom disk sizing is unsupported for Vercel Sandbox and will fail diagnostics/backend creation.
 
+### Kubernetes
+
+```bash
+hermes config set terminal.backend kubernetes
+hermes config set terminal.k8s_namespace agents
+```
+
+Hermes creates one `sleep infinity` pod per task and runs every command through `kubectl exec`. The pod name is derived by hashing the task id, so it is stable across Hermes restarts and a restart reattaches to the existing pod instead of orphaning it. Pods carry the label `app.kubernetes.io/managed-by=hermes`, so leftovers are easy to find:
+
+```bash
+kubectl get pods -l app.kubernetes.io/managed-by=hermes
+```
+
+Requires `kubectl` in `PATH`. Configuration:
+
+```yaml
+terminal:
+  backend: kubernetes
+  k8s_image: nikolaik/python-nodejs:python3.11-nodejs20
+  k8s_namespace: default
+  k8s_context: ""              # "" = kubectl's current-context
+  k8s_kubeconfig: ""           # "" = default KUBECONFIG resolution
+  k8s_service_account: ""      # "" = the namespace default ServiceAccount
+  k8s_pod_ready_timeout: 120   # seconds to wait for condition=Ready
+  k8s_extra_args: []           # flags appended verbatim to every kubectl call
+```
+
+`container_cpu` and `container_memory` become the container's resource requests and limits. `container_persistent: true` keeps the pod alive on cleanup; `false` deletes it.
+
+Required RBAC in the target namespace: `pods` (create/get/delete), `pods/exec` (create), `pods/log` (get), and `events` (list). If the pod never becomes Ready, Hermes folds `kubectl describe pod` and the pod's events into the error so image-pull and scheduling failures are visible.
+
+Current limitations:
+
+- **No file synchronization.** Unlike the SSH, Modal, Daytona, and Vercel backends, Hermes does not sync `~/.hermes` into the pod, so credentials, skills, and cache are unavailable there and credential-dependent skills will fail.
+- **`terminal.cwd` is pod-local.** The host working tree is neither mounted nor synced, so a command can succeed in the pod while your host checkout is untouched.
+- **The `/workspace` volume is an `emptyDir`** and dies with the pod. `container_persistent` keeps the *pod* alive; it is not a PersistentVolumeClaim.
+- **No PTY mode** (PTY is local/SSH only).
+- **Cancellation kills the local `kubectl` client**, not the in-pod process tree, so a child that ignores the closed stream can outlive a timeout.
+
 ### Container Resources
 
 Configure CPU, memory, disk, and persistence for all container backends:
 
 ```yaml
 terminal:
-  backend: docker  # or singularity, modal, daytona, vercel_sandbox
+  backend: docker  # or singularity, modal, daytona, vercel_sandbox, kubernetes
   container_cpu: 1              # CPU cores (default: 1)
   container_memory: 5120        # Memory in MB (default: 5GB)
   container_disk: 51200         # Disk in MB (default: 50GB)

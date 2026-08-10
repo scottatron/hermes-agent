@@ -352,7 +352,24 @@ DEFAULT_CONFIG = {
         # Vercel Sandbox runtime (vercel_sandbox backend only).
         # Supported: node24, node22, python3.13.
         "vercel_runtime": "node24",
-        # Container resource limits (docker, singularity, modal, daytona, vercel_sandbox — ignored for local/ssh)
+        # Kubernetes backend (terminal.backend: kubernetes). Hermes creates one
+        # `sleep infinity` pod per task and runs commands through `kubectl exec`.
+        # Requires kubectl in PATH and RBAC for pods (create/get/delete),
+        # pods/exec (create), pods/log (get), and events (list).
+        # NOTE: ~/.hermes credentials and skills are NOT synced into the pod,
+        # and the /workspace volume is an emptyDir that dies with the pod.
+        "k8s_image": "nikolaik/python-nodejs:python3.11-nodejs20",
+        "k8s_namespace": "default",
+        "k8s_context": "",          # "" = kubectl's current-context
+        "k8s_kubeconfig": "",       # "" = default KUBECONFIG resolution
+        "k8s_service_account": "",  # "" = the namespace default ServiceAccount
+        # Seconds to wait for the pod to reach condition=Ready before failing.
+        # On timeout Hermes folds `kubectl describe` + events into the error so
+        # image-pull and scheduling failures are visible.
+        "k8s_pod_ready_timeout": 120,
+        "k8s_extra_args": [],       # Extra flags passed verbatim to every kubectl call
+        # Container resource limits (docker, singularity, modal, daytona, vercel_sandbox,
+        # kubernetes — ignored for local/ssh)
         "container_cpu": 1,
         "container_memory": 5120,       # MB (default 5GB)
         "container_disk": 51200,        # MB (default 50GB)

@@ -461,6 +461,13 @@ def show_status(args):
     elif terminal_env == "daytona":
         daytona_image = os.getenv("TERMINAL_DAYTONA_IMAGE", "nikolaik/python-nodejs:python3.11-nodejs20")
         print(f"  Daytona Image: {daytona_image}")
+    elif terminal_env == "kubernetes":
+        k8s_image = os.getenv("TERMINAL_K8S_IMAGE", "nikolaik/python-nodejs:python3.11-nodejs20")
+        namespace = os.getenv("TERMINAL_K8S_NAMESPACE") or terminal_cfg.get("k8s_namespace") or "default"
+        context = os.getenv("TERMINAL_K8S_CONTEXT") or terminal_cfg.get("k8s_context") or "(current-context)"
+        print(f"  K8s Image:    {k8s_image}")
+        print(f"  K8s Namespace: {namespace}")
+        print(f"  K8s Context:  {context}")
     elif terminal_env == "vercel_sandbox":
         runtime = os.getenv("TERMINAL_VERCEL_RUNTIME") or terminal_cfg.get("vercel_runtime") or "node24"
         persist = os.getenv("TERMINAL_CONTAINER_PERSISTENT")
