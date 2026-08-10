@@ -1597,9 +1597,9 @@ class TestClientVersionGate:
         [
             ("0.6.1", False),
             ("0.8.4", False),
-            ("0.8.5", True),
+            ("0.9.0", True),
             ("0.8.6", False),
-            ("0.9.0", False),
+            ("0.8.5", False),
             (None, False),
             ("not-a-version", False),
         ],
