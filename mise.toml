@@ -1,0 +1,28 @@
+[deps.uv]
+[deps.aube]
+[deps]
+disable = ["npm"]
+
+[tools]
+aube = "latest"
+uv = "latest"
+
+[tasks.build-core]
+description = "Build Hermes core"
+dir = "{{config_root}}"
+run = "uv sync --extra hindsight --extra slack --extra web"
+
+[tasks.build-desktop]
+description = "Build Desktop app"
+dir = "{{config_root}}/apps/desktop"
+run = "aube run pack"
+
+[tasks.build-tui]
+description = "Build TUI"
+dir = "{{config_root}}/ui-tui"
+run = "aube run build"
+
+[tasks.build-web]
+description = "Build web dashboard"
+dir = "{{config_root}}/web"
+run = "aube run build"
