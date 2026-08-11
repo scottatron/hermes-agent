@@ -35,7 +35,8 @@ def _context_for_ca_bundle(ca_path: str) -> ssl.SSLContext:
 
 def resolve_httpx_verify(*, ca_bundle: Optional[str] = None, ssl_verify: Any = None, base_url: str = "") -> bool | ssl.SSLContext:
     """Resolve httpx ``verify``: ``ssl_verify: false`` > explicit ``ca_bundle`` >
-    CA-bundle env vars > ``True`` (certifi default). ``base_url`` only feeds the warning."""
+    outbound-routing CA > process CA-bundle env vars > ``True`` (certifi default).
+    ``base_url`` only feeds the warning."""
     if ssl_verify is False or (isinstance(ssl_verify, str) and ssl_verify.strip().lower() in _INSECURE_STRINGS):
         logger.warning(
             "TLS certificate verification DISABLED (ssl_verify: false) for %s — "
@@ -45,8 +46,25 @@ def resolve_httpx_verify(*, ca_bundle: Optional[str] = None, ssl_verify: Any = N
         )
         return False
 
-    effective_ca = (ca_bundle or "").strip() or next(
-        (v for v in (os.getenv(var, "").strip() for var in _CA_BUNDLE_ENV_VARS) if v), "",
+    from agent.outbound_routing import get_outbound_routing_env
+
+    routing = get_outbound_routing_env()
+    routing_ca = next(
+        (
+            routing.get(key, "").strip()
+            for key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+            if routing.get(key, "").strip()
+        ),
+        "",
+    )
+    # A profile-aware route and its MITM trust root are one configuration.
+    # Prefer that context-local CA over process-global env inherited from the
+    # dispatcher/host profile; otherwise a Kanban worker can select profile B's
+    # proxy while verifying it with profile A's stale CA.
+    effective_ca = (
+        (ca_bundle or "").strip()
+        or routing_ca
+        or next((v for v in (os.getenv(var, "").strip() for var in _CA_BUNDLE_ENV_VARS) if v), "")
     )
     if effective_ca:
         ca_path = str(Path(effective_ca).expanduser())

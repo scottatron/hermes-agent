@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import time
+import urllib.request
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -87,6 +89,40 @@ class TestFetchSuccess:
         assert cache_file.exists()
         with open(cache_file) as fh:
             assert json.load(fh) == manifest
+
+    def test_fetch_uses_profile_outbound_proxy_and_ca(self, isolated_home):
+        """Early urllib fetches honor plugin-supplied routing without env mutation."""
+        from hermes_cli import model_catalog
+
+        payload = json.dumps(_valid_manifest()).encode()
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = payload
+        opener = MagicMock()
+        opener.open.return_value = response
+        context = ssl.create_default_context()
+        proxy = "http://profile-proxy:14322"
+        ca_path = str(isolated_home / "profile-ca.pem")
+        Path(ca_path).touch()
+
+        with patch(
+            "agent.process_bootstrap._get_proxy_for_base_url", return_value=proxy
+        ), patch(
+            "agent.outbound_routing.get_outbound_routing_env",
+            return_value={"HTTPS_PROXY": proxy, "SSL_CERT_FILE": ca_path},
+        ), patch.object(
+            ssl, "create_default_context", return_value=context
+        ), patch.object(
+            urllib.request, "build_opener", return_value=opener
+        ) as build_opener:
+            result = model_catalog._fetch_manifest("https://catalog.example/models", 5.0)
+
+        assert result == _valid_manifest()
+        handlers = build_opener.call_args.args
+        proxy_handler = next(h for h in handlers if isinstance(h, urllib.request.ProxyHandler))
+        https_handler = next(h for h in handlers if isinstance(h, urllib.request.HTTPSHandler))
+        assert proxy_handler.proxies == {"https": proxy}
+        assert https_handler._context is context
+        opener.open.assert_called_once()
 
 
 class TestFetchFailure:
