@@ -1,8 +1,8 @@
 """Profile distributions — shareable, packaged Hermes profiles via git.
 
 Sources: a git URL (``github.com/user/repo``, ``https://...``, ``git@...``, ``ssh://``,
-``git://``) or a local directory that already contains ``distribution.yaml`` (profile
-development before the first push).
+``git://``), optionally with ``ref`` and ``subdirectory`` selectors, or a local directory
+that already contains ``distribution.yaml`` (profile development before the first push).
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote, unquote
 
 import yaml
 
@@ -104,6 +105,8 @@ class DistributionManifest:
     distribution_owned: List[str] = field(default_factory=list)
     # Tracked after install — where we pulled from, so ``update`` can re-pull.
     source: str = ""
+    # Resolved Git commit staged by the installer (empty for local sources).
+    source_commit: str = ""
     # ISO-8601 UTC timestamp written on install/update (empty in repo-shipped manifests).
     installed_at: str = ""
 
@@ -125,7 +128,8 @@ class DistributionManifest:
             hermes_requires=_str(data, "hermes_requires"), author=_str(data, "author"),
             license=_str(data, "license"), env_requires=[EnvRequirement.from_dict(e) for e in env_raw],
             distribution_owned=[str(p).strip().strip("/") for p in dist_owned_raw if str(p).strip()],
-            source=_str(data, "source"), installed_at=_str(data, "installed_at"),
+            source=_str(data, "source"), source_commit=_str(data, "source_commit"),
+            installed_at=_str(data, "installed_at"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -136,7 +140,7 @@ class DistributionManifest:
             ("author", self.author), ("license", self.license),
             ("env_requires", [e.to_dict() for e in self.env_requires]),
             ("distribution_owned", self.distribution_owned), ("source", self.source),
-            ("installed_at", self.installed_at),
+            ("source_commit", self.source_commit), ("installed_at", self.installed_at),
         )
         out.update((k, v) for k, v in optional if v)
         return out
@@ -217,6 +221,83 @@ def _env_template_from_manifest(manifest: DistributionManifest) -> str:
 _GITHUB_SHORTHAND_RE = re.compile(r"^github\.com/[\w.-]+/[\w.-]+/?$")
 
 
+@dataclass(frozen=True)
+class DistributionSource:
+    """Canonical Git source plus optional ref and repository subdirectory."""
+
+    clone_url: str
+    ref: Optional[str] = None
+    subdirectory: Optional[str] = None
+
+    @property
+    def canonical(self) -> str:
+        base = _normalize_git_url(self.clone_url)
+        selectors = []
+        if self.ref is not None:
+            selectors.append(f"ref={quote(self.ref, safe='/-._~')}")
+        if self.subdirectory is not None:
+            selectors.append(f"subdirectory={quote(self.subdirectory, safe='/-._~')}")
+        return f"{base}#{'&'.join(selectors)}" if selectors else base
+
+
+def _validate_source_text(value: str, label: str) -> str:
+    if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise DistributionError(
+            f"Git {label} must be non-empty and contain no control characters"
+        )
+    if value.startswith("-"):
+        raise DistributionError(f"Git {label} must not begin with '-'")
+    return value
+
+
+def _validate_subdirectory(value: str) -> str:
+    value = _validate_source_text(value, "subdirectory")
+    if "\\" in value:
+        raise DistributionError("Git subdirectory must use POSIX '/' separators")
+    if value.startswith("/") or value.endswith("/"):
+        raise DistributionError("Git subdirectory must be a relative path")
+    if re.match(r"^[A-Za-z]:", value) or value.startswith("//"):
+        raise DistributionError("Git subdirectory must not be a drive or UNC path")
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise DistributionError(
+            "Git subdirectory must contain only non-empty, non-dot relative path components"
+        )
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise DistributionError(
+            "Git subdirectory must contain only non-empty, non-dot relative path components"
+        )
+    return "/".join(path.parts)
+
+
+def _parse_source_fragment(fragment: str) -> Tuple[Optional[str], Optional[str]]:
+    if not fragment:
+        raise DistributionError("Git source fragment must not be empty")
+    if "=" not in fragment and "&" not in fragment:
+        return _validate_source_text(unquote(fragment), "ref"), None
+    values: Dict[str, str] = {}
+    for part in fragment.split("&"):
+        if "=" not in part:
+            raise DistributionError("Git source selectors must use key=value syntax")
+        raw_key, raw_value = part.split("=", 1)
+        key, value = unquote(raw_key), unquote(raw_value)
+        if key not in {"ref", "subdirectory"}:
+            raise DistributionError(
+                f"Unknown Git source selector '{key}'; expected ref or subdirectory"
+            )
+        if key in values:
+            raise DistributionError(f"Duplicate Git source selector '{key}'")
+        values[key] = value
+    ref = _validate_source_text(values["ref"], "ref") if "ref" in values else None
+    subdirectory = (
+        _validate_subdirectory(values["subdirectory"])
+        if "subdirectory" in values
+        else None
+    )
+    return ref, subdirectory
+
+
 def _looks_like_git_url(s: str) -> bool:
     """Any http(s) URL is a git repo — git is the only remote transport (no tar.gz URLs)."""
     s = s.strip()
@@ -227,48 +308,120 @@ def _looks_like_git_url(s: str) -> bool:
     )
 
 
-def _git_clone(url: str, dest: Path) -> None:
+def _normalize_git_url(url: str) -> str:
     if _GITHUB_SHORTHAND_RE.match(url):
-        url = f"https://{url.rstrip('/')}"
+        return f"https://{url.rstrip('/')}"
+    return url
+
+
+def _parse_git_source(source: str) -> Optional[DistributionSource]:
+    base, separator, fragment = source.partition("#")
+    if not _looks_like_git_url(base):
+        return None
+    ref, subdirectory = _parse_source_fragment(fragment) if separator else (None, None)
+    return DistributionSource(base, ref=ref, subdirectory=subdirectory)
+
+
+def _run_git(args: List[str], operation: str) -> str:
     try:
-        subprocess.run(
-            ["git", "clone", "--depth", "1", url, str(dest)], check=True, capture_output=True,
+        result = subprocess.run(
+            ["git", *args], check=True, capture_output=True,
             stdin=subprocess.DEVNULL, env=noninteractive_git_env(),
         )
     except FileNotFoundError as exc:
         raise DistributionError("git is required for git-URL installs") from exc
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
-        raise DistributionError(f"git clone failed: {stderr.strip()}") from exc
+        raise DistributionError(f"git {operation} failed: {stderr.strip()}") from exc
+    return result.stdout.decode("utf-8", errors="replace").strip()
 
 
-def _stage_source(source: str, workdir: Path) -> Tuple[Path, str]:
-    """Resolve *source* to ``(staged_dir, provenance)``: git URLs are shallow-cloned into
-    *workdir* (``.git`` removed); a local directory is used in place."""
-    src_str = source.strip()
-    if _looks_like_git_url(src_str):
-        staged, provenance = workdir / "clone", src_str
-        _git_clone(src_str, staged)
-        shutil.rmtree(staged / ".git", ignore_errors=True)
-        missing = (
-            f"No {MANIFEST_FILENAME} at the root of {src_str!r}. "
-            "This repository is not a Hermes profile distribution."
-        )
-    elif (path_guess := Path(src_str).expanduser()).is_dir():
-        staged = path_guess.resolve()
-        provenance = str(staged)
-        missing = (
-            f"No {MANIFEST_FILENAME} in {path_guess}. "
-            "A local-directory source must contain a distribution.yaml at its root."
-        )
+def _git_clone(source: DistributionSource, dest: Path) -> str:
+    """Clone *source* and return the resolved commit SHA."""
+    url = _normalize_git_url(source.clone_url)
+    if source.ref is None:
+        _run_git(["clone", "--depth", "1", url, str(dest)], "clone")
     else:
+        _run_git(["clone", "--depth", "1", "--no-checkout", url, str(dest)], "clone")
+        _run_git(["-C", str(dest), "fetch", "--depth", "1", "origin", source.ref], "fetch")
+        _run_git(["-C", str(dest), "checkout", "--detach", "FETCH_HEAD"], "checkout")
+    return _run_git(["-C", str(dest), "rev-parse", "HEAD"], "rev-parse")
+
+
+def _select_subdirectory(clone_root: Path, subdirectory: Optional[str]) -> Path:
+    """Select a validated, non-symlinked subtree from a Git clone."""
+    if subdirectory is None:
+        return clone_root
+    root = clone_root.resolve()
+    candidate = clone_root
+    for component in subdirectory.split("/"):
+        next_path = candidate / component
+        try:
+            next_path.lstat()
+        except FileNotFoundError as exc:
+            raise DistributionError(
+                f"Git subdirectory '{subdirectory}' does not exist"
+            ) from exc
+        if next_path.is_symlink():
+            raise DistributionError(
+                f"Git subdirectory path component '{component}' is a symlink"
+            )
+        if not next_path.is_dir():
+            raise DistributionError(f"Git subdirectory '{subdirectory}' is not a directory")
+        candidate = next_path
+    try:
+        candidate.resolve().relative_to(root)
+    except ValueError as exc:
         raise DistributionError(
+            f"Git subdirectory '{subdirectory}' escapes the repository"
+        ) from exc
+    return candidate
+
+
+def _reject_nested_git_metadata(staged: Path, clone_root: Path) -> None:
+    for entry in staged.rglob(".git"):
+        if staged == clone_root and entry == clone_root / ".git":
+            continue
+        raise DistributionError(
+            "Profile distributions cannot contain nested Git metadata: "
+            f"{entry.relative_to(staged)}"
+        )
+
+
+def _stage_source(source: str, workdir: Path) -> Tuple[Path, str, Optional[str]]:
+    """Resolve *source* to ``(staged_dir, provenance, source_commit)``."""
+    src_str = source.strip()
+    path_guess = Path(src_str).expanduser()
+    if path_guess.is_dir():
+        if not (path_guess / MANIFEST_FILENAME).is_file():
+            raise DistributionError(
+                f"No {MANIFEST_FILENAME} in {path_guess}. "
+                "A local-directory source must contain a distribution.yaml at its root."
+            )
+        resolved = path_guess.resolve()
+        return resolved, str(resolved), None
+    git_source = _parse_git_source(src_str)
+    if git_source is not None:
+        cloned = workdir / "clone"
+        source_commit = _git_clone(git_source, cloned)
+        selected = _select_subdirectory(cloned, git_source.subdirectory)
+        _reject_nested_git_metadata(selected, cloned)
+        if not (selected / MANIFEST_FILENAME).is_file():
+            location = (
+                f"subdirectory '{git_source.subdirectory}'"
+                if git_source.subdirectory
+                else "the repository root"
+            )
+            raise DistributionError(
+                f"No {MANIFEST_FILENAME} in {location} of {src_str!r}. "
+                "This source is not a Hermes profile distribution."
+            )
+        shutil.rmtree(cloned / ".git", ignore_errors=True)
+        return selected, git_source.canonical, source_commit
+    raise DistributionError(
         f"Cannot resolve distribution source: {source!r}. "
         "Expected a git URL (e.g. github.com/user/repo) or a local directory."
     )
-    if not (staged / MANIFEST_FILENAME).is_file():
-        raise DistributionError(missing)
-    return staged, provenance
 
 
 def _reject_distribution_symlinks(staged: Path) -> None:
@@ -291,6 +444,7 @@ class InstallPlan:
     manifest: DistributionManifest
     staged_dir: Path
     provenance: str
+    source_commit: Optional[str]
     target_dir: Path
     existing: bool  # True if target profile already exists (update path)
     preserves_config: bool = True
@@ -306,7 +460,7 @@ def plan_install(source: str, workdir: Path, override_name: Optional[str] = None
     """Stage *source* and produce a plan describing what install would do."""
     from hermes_cli.profiles import _canon_valid, get_profile_dir
     from hermes_cli import __version__ as hermes_version
-    staged, provenance = _stage_source(source, workdir)
+    staged, provenance, source_commit = _stage_source(source, workdir)
     _reject_distribution_symlinks(staged)
     manifest = read_manifest(staged)
     if manifest is None:
@@ -322,12 +476,14 @@ def plan_install(source: str, workdir: Path, override_name: Optional[str] = None
         )
     manifest.name = canon
     manifest.source = provenance
+    manifest.source_commit = source_commit or ""
     # Stamped once here so both fresh install and update propagate a fresh timestamp.
     manifest.installed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     target_dir = get_profile_dir(canon)
     existing = target_dir.is_dir()
     return InstallPlan(
-        manifest=manifest, staged_dir=staged, provenance=provenance, target_dir=target_dir, existing=existing,
+        manifest=manifest, staged_dir=staged, provenance=provenance,
+        source_commit=source_commit, target_dir=target_dir, existing=existing,
         preserves_config=existing, has_cron=_has_cron_jobs(staged),
     )
 

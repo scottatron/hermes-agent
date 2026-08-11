@@ -59,6 +59,19 @@ Recipients run:
 hermes profile install github.com/you/my-research-agent --alias
 ```
 
+The distribution may also live below the repository root. Select it with a
+keyed URL fragment:
+
+```bash
+hermes profile install 'https://github.com/you/hermes-profiles.git#subdirectory=profiles/research-bot'
+```
+
+When a ref is needed, combine selectors in the same fragment:
+
+```bash
+hermes profile install 'https://github.com/you/hermes-profiles.git#ref=v1.2.0&subdirectory=profiles/research-bot'
+```
+
 …and they now have the whole agent. They fill in their own API keys (`.env.EXAMPLE` → `.env`), and they can run `my-research-agent chat` or address it through Telegram / Discord / Slack / any gateway platform. When you push a new version, they run `hermes profile update my-research-agent` and pull your changes — their memories and sessions stay put.
 
 ## Why git?
@@ -317,6 +330,12 @@ hermes profile install git@github.com:you/research-bot.git
 # Self-hosted, GitLab, Gitea, Forgejo — any Git host
 hermes profile install https://git.example.com/team/research-bot.git
 
+# Repository containing several distributions
+hermes profile install 'https://github.com/you/hermes-profiles.git#subdirectory=profiles/research-bot'
+
+# Pin a branch, tag, or commit while selecting a distribution
+hermes profile install 'https://github.com/you/hermes-profiles.git#ref=release/2026.08&subdirectory=profiles/research-bot'
+
 # Private repo using your configured git auth
 hermes profile install git@github.com:your-org/internal-bot.git
 
@@ -402,7 +421,8 @@ hermes profile update research-bot
 
 What happens:
 
-1. Re-clones the repo from the recorded source URL.
+1. Re-clones the repo from the recorded source specification and selects the
+   same subdirectory, if one was specified.
 2. Replaces distribution-owned files (SOUL, skills, cron, mcp.json).
 3. **Preserves** your `config.yaml` — you may have tuned the model, temperature, or other settings. Pass `--force-config` to overwrite.
 4. **Never touches** user data: memories, sessions, auth, `.env`, logs, state.
@@ -551,9 +571,15 @@ The install-delete cycle is cheap enough to be disposable.
 
 ### Pin to a specific version
 
-:::note
-Git ref pinning (`#v1.2.0`) is planned but not in the initial release — install currently tracks the default branch. Track your installed version via `hermes profile info <name>` and hold off on updates until you're ready.
-:::
+Use a keyed `ref` selector for a branch, tag, or immutable commit. Quote the
+whole source because `&` is a shell metacharacter:
+
+```bash
+hermes profile install 'https://github.com/you/hermes-profiles.git#ref=v1.2.0&subdirectory=profiles/research-bot'
+```
+
+`hermes profile info` records the canonical source and the resolved commit
+SHA. Updates replay the complete source specification and refresh that SHA.
 
 ### Check what version you're on vs. latest
 

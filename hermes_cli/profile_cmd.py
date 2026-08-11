@@ -59,6 +59,8 @@ def _render_distribution_plan(plan) -> None:
     if mf.hermes_requires:
         print(f"  Requires: Hermes {mf.hermes_requires}")
     print(f"  Source:   {plan.provenance}")
+    if plan.source_commit:
+        print(f"  Commit:   {plan.source_commit}")
     print(f"  Target:   {plan.target_dir}")
     if plan.existing:
         # Updating an existing distribution (dist-owned overwritten, config preserved, user
@@ -311,6 +313,15 @@ def _profile_show(args):
     model, provider = _read_config_model(profile_dir)
     gw = _check_gateway_running(profile_dir) or _served_by_running_multiplexer(name)
     dist_name, dist_version, dist_source = _read_distribution_meta(profile_dir)
+    dist_commit = None
+    if dist_name:
+        try:
+            from hermes_cli.profile_distribution import read_manifest
+
+            manifest = read_manifest(profile_dir)
+            dist_commit = manifest.source_commit if manifest else None
+        except Exception:
+            pass
     alias_name = find_alias_for_profile(name)
     display = read_profile_meta(profile_dir).get("display_name", "")
     print(f"\nProfile: {format_profile_label(name, display)}")
@@ -325,6 +336,8 @@ def _profile_show(args):
         print(f"Distribution: {dist_name}@{dist_version or '?'}")
         if dist_source:
             print(f"Installed from: {dist_source}")
+        if dist_commit:
+            print(f"Resolved commit: {dist_commit}")
         print(f"  (run `hermes profile info {name}` for full manifest)")
     if alias_name:
         print(f"Alias:   {alias_name} → hermes -p {name}  ({_wrapper_path(alias_name)})")
@@ -447,6 +460,8 @@ def _profile_update(args):
         if not getattr(args, "yes", False):
             print(f"\nUpdate '{canon}' from: {current.source or '(no source)'}")
             print(f"  Currently at version {current.version}")
+            if current.source_commit:
+                print(f"  Currently at commit {current.source_commit}")
             if force_config:
                 print("  --force-config set: config.yaml WILL be overwritten.")
             else:
@@ -469,6 +484,7 @@ _INFO_FIELDS = (
     ("license", "License:      "),
     ("hermes_requires", "Requires:     Hermes "),
     ("source", "Source:       "),
+    ("source_commit", "Source commit: "),
     ("installed_at", "Installed:    "),
 )
 
