@@ -5,6 +5,10 @@ import ssl
 import certifi
 import pytest
 
+from agent.outbound_routing import (
+    clear_outbound_routing_provider,
+    register_outbound_routing_provider,
+)
 from agent.ssl_verify import resolve_httpx_verify
 
 _CA_ENV_VARS = ("HERMES_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
@@ -14,6 +18,9 @@ _CA_ENV_VARS = ("HERMES_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
 def clean_ca_env(monkeypatch):
     for var in _CA_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+    clear_outbound_routing_provider()
+    yield
+    clear_outbound_routing_provider()
 
 
 
@@ -30,3 +37,13 @@ def test_hermes_ca_bundle_returns_ssl_context(clean_ca_env, monkeypatch):
 
 def test_default_without_env_is_true(clean_ca_env):
     assert resolve_httpx_verify() is True
+
+
+def test_outbound_routing_ca_bundle_returns_ssl_context(clean_ca_env):
+    register_outbound_routing_provider(
+        lambda: {"SSL_CERT_FILE": certifi.where()}
+    )
+
+    result = resolve_httpx_verify()
+
+    assert isinstance(result, ssl.SSLContext)

@@ -32,7 +32,8 @@ def resolve_httpx_verify(
     2. explicit ``ca_bundle`` (per-provider ``ssl_ca_cert`` config field)
     3. ``HERMES_CA_BUNDLE``, ``SSL_CERT_FILE``, ``REQUESTS_CA_BUNDLE``,
        ``CURL_CA_BUNDLE`` env vars
-    4. ``True`` (httpx/certifi default)
+    4. the same CA variables supplied by the active outbound-routing provider
+    5. ``True`` (httpx/certifi default)
 
     ``base_url`` is used only for the insecure-mode warning message.
     """
@@ -52,6 +53,25 @@ def resolve_httpx_verify(
         or os.getenv("REQUESTS_CA_BUNDLE", "").strip()
         or os.getenv("CURL_CA_BUNDLE", "").strip()
     )
+    if not effective_ca:
+        # Profile-aware routing providers (for example Agent Vault) may supply
+        # trust configuration without mutating the process environment.
+        # Resolve it here so provider clients use the same CA as their proxy.
+        from agent.outbound_routing import get_outbound_routing_env
+
+        routing = get_outbound_routing_env()
+        effective_ca = next(
+            (
+                routing.get(key, "").strip()
+                for key in (
+                    "SSL_CERT_FILE",
+                    "REQUESTS_CA_BUNDLE",
+                    "CURL_CA_BUNDLE",
+                )
+                if routing.get(key, "").strip()
+            ),
+            "",
+        )
     if effective_ca:
         ca_path = str(Path(effective_ca).expanduser())
         if os.path.isfile(ca_path):
