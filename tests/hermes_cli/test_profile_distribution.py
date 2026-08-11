@@ -1,16 +1,14 @@
 """Tests for hermes_cli.profile_distribution — git-based profile installs.
 
 Covers manifest parsing, version requirement checks, install / update / describe
-on local-directory sources, and guards on what can and can't be installed.
-
-Transport-layer tests (git clone, URL handling) are exercised through live
-E2E runs, not unit tests — git itself is tested upstream, and subprocess-
-mocking git would just test the mock.
+on local-directory and local-Git sources, and guards on what can and can't be
+installed.
 """
 
 from __future__ import annotations
 
 import sys
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -19,11 +17,14 @@ from hermes_cli.profile_distribution import (
     DEFAULT_DIST_OWNED,
     DistributionError,
     DistributionManifest,
+    DistributionSource,
     EnvRequirement,
     MANIFEST_FILENAME,
     USER_OWNED_EXCLUDE,
     _env_template_from_manifest,
     _looks_like_git_url,
+    _parse_git_source,
+    _select_subdirectory,
     _parse_semver,
     check_hermes_requires,
     describe_distribution,
@@ -130,11 +131,15 @@ class TestManifestParsing:
             version="1.0.0",
             description="roundtrip",
             env_requires=[EnvRequirement(name="FOO", description="foo")],
+            source="https://example.invalid/profiles.git#subdirectory=research",
+            source_commit="0123456789abcdef",
         )
         write_manifest(tmp_path, original)
         parsed = read_manifest(tmp_path)
         assert parsed.name == "rt"
         assert parsed.env_requires[0].name == "FOO"
+        assert parsed.source.endswith("#subdirectory=research")
+        assert parsed.source_commit == "0123456789abcdef"
 
 
 # ===========================================================================
@@ -209,6 +214,135 @@ class TestLooksLikeGitUrl:
     ])
     def test_accepts_git_sources(self, src):
         assert _looks_like_git_url(src)
+
+    def test_canonicalizes_keyed_fragment_selectors(self):
+        source = _parse_git_source(
+            "https://github.com/acme/profiles.git#subdirectory=profiles/research%2Dbot&ref=release/2026.08"
+        )
+        assert source == DistributionSource(
+            "https://github.com/acme/profiles.git",
+            ref="release/2026.08",
+            subdirectory="profiles/research-bot",
+        )
+        assert source.canonical == (
+            "https://github.com/acme/profiles.git#ref=release/2026.08&"
+            "subdirectory=profiles/research-bot"
+        )
+
+    @pytest.mark.parametrize(
+        "fragment",
+        [
+            "unknown=value",
+            "ref=main&ref=other",
+            "subdirectory=../escape",
+            "subdirectory=%2Fabsolute",
+            "subdirectory=profiles%5Cbot",
+            "subdirectory=.",
+            "subdirectory=profiles//bot",
+        ],
+    )
+    def test_rejects_invalid_fragment_selectors(self, fragment):
+        with pytest.raises(DistributionError):
+            _parse_git_source(f"https://github.com/acme/profiles.git#{fragment}")
+
+    def test_unkeyed_fragment_is_a_ref_only(self):
+        source = _parse_git_source("https://github.com/acme/profiles.git#v1.2.0")
+        assert source.ref == "v1.2.0"
+        assert source.subdirectory is None
+        assert source.canonical.endswith("#ref=v1.2.0")
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    )
+    return result.stdout.strip()
+
+
+def _make_bare_git_distribution(tmp_path: Path) -> tuple[Path, Path, str]:
+    work = tmp_path / "working-repo"
+    bare = tmp_path / "profiles.git"
+    work.mkdir()
+    _git(work, "init", "--initial-branch=main")
+    _git(work, "config", "user.email", "tests@example.invalid")
+    _git(work, "config", "user.name", "Profile Tests")
+    distribution = work / "profiles" / "research-bot"
+    _make_staging_dir(distribution.parent, "research-bot")
+    (distribution.parent / "staging_research-bot").rename(distribution)
+    _git(work, "add", ".")
+    _git(
+        work,
+        "-c",
+        "user.email=tests@example.invalid",
+        "-c",
+        "user.name=Profile Tests",
+        "commit",
+        "-m",
+        "initial distribution",
+    )
+    _git(tmp_path, "init", "--bare", str(bare))
+    _git(work, "remote", "add", "origin", str(bare))
+    _git(work, "push", "origin", "main")
+    return bare, work, _git(work, "rev-parse", "HEAD")
+
+
+class TestGitSubdirectoryInstall:
+    def test_install_and_update_selected_subdirectory(self, profile_env, tmp_path):
+        bare, work, initial_commit = _make_bare_git_distribution(tmp_path)
+        source = f"{bare}#ref=main&subdirectory=profiles/research-bot"
+
+        plan = install_distribution(source, name="research")
+        manifest = read_manifest(plan.target_dir)
+        assert manifest.source == (
+            f"{bare}#ref=main&subdirectory=profiles/research-bot"
+        )
+        assert manifest.source_commit == initial_commit
+        assert (plan.target_dir / "SOUL.md").read_text() == "I am Source.\n"
+
+        (work / "profiles" / "research-bot" / "SOUL.md").write_text(
+            "I am Source v2.\n"
+        )
+        _git(work, "add", ".")
+        _git(
+            work,
+            "-c",
+            "user.email=tests@example.invalid",
+            "-c",
+            "user.name=Profile Tests",
+            "commit",
+            "-m",
+            "update nested distribution",
+        )
+        _git(work, "push", "origin", "main")
+        updated_commit = _git(work, "rev-parse", "HEAD")
+
+        update_distribution("research")
+        updated = read_manifest(plan.target_dir)
+        assert (plan.target_dir / "SOUL.md").read_text() == "I am Source v2.\n"
+        assert updated.source == manifest.source
+        assert updated.source_commit == updated_commit
+
+    def test_local_directory_with_hash_in_name_remains_local(self, profile_env, tmp_path):
+        local = tmp_path / "profile#with-hash"
+        local.mkdir()
+        _make_staging_dir(tmp_path, "profile#with-hash")
+        (tmp_path / "staging_profile#with-hash").rename(local)
+
+        plan = install_distribution(str(local), name="hash-local")
+        assert plan.manifest.source == str(local.resolve())
+
+    def test_subdirectory_path_component_symlink_is_rejected(self, tmp_path):
+        root = tmp_path / "clone"
+        root.mkdir()
+        target = tmp_path / "outside"
+        target.mkdir()
+        try:
+            (root / "profiles").symlink_to(target, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable in test environment: {exc}")
+
+        with pytest.raises(DistributionError, match="is a symlink"):
+            _select_subdirectory(root, "profiles/research-bot")
 
 
 # ===========================================================================
@@ -813,4 +947,3 @@ class TestManifestCrashDurability:
 
         mode = stat.S_IMODE(mf.stat().st_mode)
         assert mode == 0o644, f"new manifest created as {oct(mode)}"
-
