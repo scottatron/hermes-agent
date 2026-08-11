@@ -324,7 +324,7 @@ Installs a profile distribution from a git URL or a local directory.
 
 | Option | Description |
 |--------|-------------|
-| `<source>` | Git URL (`github.com/user/repo`, `https://...`, `git@...`, `ssh://`, `git://`) or a local directory containing `distribution.yaml` at its root. |
+| `<source>` | Git URL (`github.com/user/repo`, `https://...`, `git@...`, `ssh://`, `git://`) with optional `#ref=...&subdirectory=...` selectors, or a local directory containing `distribution.yaml` at its root. |
 | `--name NAME` | Override the profile name from the manifest. |
 | `--alias` | Also create a shell wrapper (e.g. `telemetry` → `hermes -p telemetry`). |
 | `--force` | Overwrite an existing profile of the same name. User data is still preserved. |
@@ -342,6 +342,9 @@ hermes profile install github.com/kyle/telemetry-distribution --alias
 
 # Install from a full HTTPS git URL
 hermes profile install https://github.com/kyle/telemetry-distribution.git
+
+# Install a distribution below a repository root (quote the &)
+hermes profile install 'https://github.com/kyle/hermes-profiles.git#ref=main&subdirectory=profiles/telemetry'
 
 # Install from SSH
 hermes profile install git@github.com:kyle/telemetry-distribution.git
@@ -371,7 +374,7 @@ hermes profile info <name>
 
 Prints the profile's distribution manifest — name, version, required
 Hermes version, author, env var requirements, the source URL/path, and
-the `Installed:` timestamp recorded when the distribution was last
+the resolved source commit and `Installed:` timestamp recorded when the distribution was last
 `install`-ed or `update`-d. Useful for checking what a shared profile
 needs before installing it, and for spotting "this profile was installed
 6 months ago and hasn't been updated."
