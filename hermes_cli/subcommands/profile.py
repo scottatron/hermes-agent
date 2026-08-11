@@ -155,13 +155,17 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
         help="Install a profile distribution from a git URL or local directory",
         description=(
             "Install a Hermes profile distribution. SOURCE can be a git URL "
-            "(github.com/user/repo, https://..., git@...) or a local "
-            "directory containing distribution.yaml at its root."
+            "(github.com/user/repo, https://..., git@...) with optional "
+            "#ref=...&subdirectory=... selectors, or a local directory "
+            "containing distribution.yaml at its root."
         ),
     )
     profile_install.add_argument(
         "source",
-        help="Distribution source (git URL or local directory)",
+        help=(
+            "Distribution source; quote Git selectors, e.g. "
+            "'https://host/repo.git#ref=main&subdirectory=profiles/foo'"
+        ),
     )
     profile_install.add_argument(
         "--name", dest="install_name", metavar="NAME",
