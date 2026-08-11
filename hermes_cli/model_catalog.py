@@ -46,9 +46,11 @@ from __future__ import annotations
 
 import json
 import logging
+import ssl
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -133,7 +135,41 @@ def _fetch_manifest(url: str, timeout: float) -> dict[str, Any] | None:
                 "User-Agent": _HERMES_USER_AGENT,
             },
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # ``urllib`` only consults the process environment. Profile-aware
+        # outbound-routing providers deliberately avoid mutating that global
+        # state, so resolve their proxy and CA explicitly just as the model and
+        # auxiliary HTTP clients do. This matters during early startup, before
+        # a profile's routing values have been mirrored into any child env.
+        from agent.process_bootstrap import _get_proxy_for_base_url
+        from agent.outbound_routing import get_outbound_routing_env
+        from agent.ssl_verify import resolve_httpx_verify
+
+        handlers: list[Any] = []
+        proxy = _get_proxy_for_base_url(url)
+        if proxy:
+            scheme = urllib.parse.urlsplit(url).scheme or "https"
+            handlers.append(urllib.request.ProxyHandler({scheme: proxy}))
+        # Keep the trust root paired with the selected profile route. A
+        # process-global CA variable may belong to the host profile while this
+        # request is executing in another profile's context.
+        routing = get_outbound_routing_env()
+        routing_ca = next(
+            (
+                routing.get(key, "").strip()
+                for key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+                if routing.get(key, "").strip()
+            ),
+            "",
+        )
+        verify = (
+            ssl.create_default_context(cafile=str(Path(routing_ca).expanduser()))
+            if routing_ca and Path(routing_ca).expanduser().is_file()
+            else resolve_httpx_verify(base_url=url)
+        )
+        if isinstance(verify, ssl.SSLContext):
+            handlers.append(urllib.request.HTTPSHandler(context=verify))
+        opener = urllib.request.build_opener(*handlers)
+        with opener.open(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
         logger.info("model catalog fetch failed (%s): %s", url, exc)

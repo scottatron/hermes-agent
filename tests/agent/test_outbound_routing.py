@@ -82,11 +82,16 @@ def test_mcp_and_tool_children_receive_profile_routing():
         }
     )
     from tools.code_execution_tool import _scrub_child_env
-    from tools.environments.local import _sanitize_subprocess_env, hermes_subprocess_env
+    from tools.environments.local import (
+        _make_run_env,
+        _sanitize_subprocess_env,
+        hermes_subprocess_env,
+    )
     from tools.mcp_tool import _build_safe_env
 
     for env in (
         _build_safe_env(None),
+        _make_run_env({"PATH": os.environ.get("PATH", "")}),
         _sanitize_subprocess_env({"PATH": os.environ.get("PATH", "")}),
         hermes_subprocess_env(),
         _scrub_child_env({}, is_passthrough=lambda _: False, is_windows=False),
