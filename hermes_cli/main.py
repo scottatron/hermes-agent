@@ -11328,6 +11328,15 @@ def cmd_profile(args):
         gw = _check_gateway_running(profile_dir)
         skills = _count_skills(profile_dir)
         dist_name, dist_version, dist_source = _read_distribution_meta(profile_dir)
+        dist_commit = None
+        if dist_name:
+            try:
+                from hermes_cli.profile_distribution import read_manifest
+
+                shown_manifest = read_manifest(profile_dir)
+                dist_commit = shown_manifest.source_commit if shown_manifest else None
+            except Exception:
+                pass
         alias_name = find_alias_for_profile(name)
         display = read_profile_meta(profile_dir).get("display_name", "")
 
@@ -11347,6 +11356,8 @@ def cmd_profile(args):
             print(f"Distribution: {dist_name}@{dist_version or '?'}")
             if dist_source:
                 print(f"Installed from: {dist_source}")
+            if dist_commit:
+                print(f"Resolved commit: {dist_commit}")
             print(f"  (run `hermes profile info {name}` for full manifest)")
         if alias_name:
             is_windows = sys.platform == "win32"
@@ -11511,6 +11522,8 @@ def cmd_profile(args):
             if not getattr(args, "yes", False):
                 print(f"\nUpdate '{canon}' from: {current.source or '(no source)'}")
                 print(f"  Currently at version {current.version}")
+                if current.source_commit:
+                    print(f"  Currently at commit {current.source_commit}")
                 if force_config:
                     print("  --force-config set: config.yaml WILL be overwritten.")
                 else:
@@ -11561,6 +11574,8 @@ def cmd_profile(args):
             print(f"Requires:     Hermes {data['hermes_requires']}")
         if data.get("source"):
             print(f"Source:       {data['source']}")
+        if data.get("source_commit"):
+            print(f"Source commit: {data['source_commit']}")
         if data.get("installed_at"):
             print(f"Installed:    {data['installed_at']}")
         env_reqs = data.get("env_requires") or []
@@ -11589,6 +11604,8 @@ def _render_distribution_plan(plan) -> None:
     if mf.hermes_requires:
         print(f"  Requires: Hermes {mf.hermes_requires}")
     print(f"  Source:   {plan.provenance}")
+    if plan.source_commit:
+        print(f"  Commit:   {plan.source_commit}")
     print(f"  Target:   {plan.target_dir}")
     if plan.existing:
         # Distinguish "updating an existing distribution" (well-understood
