@@ -10,7 +10,7 @@ uv = "latest"
 [tasks.build-core]
 description = "Build Hermes core"
 dir = "{{config_root}}"
-run = "uv sync --extra hindsight --extra slack --extra web"
+run = "uv sync --extra hindsight --extra slack --extra web --extra edge-tts --extra mcp"
 
 [tasks.symlink-core-bin]
 description = "Symlink hermes bin into ~/.local/bin"
