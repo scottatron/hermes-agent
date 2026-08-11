@@ -1,6 +1,8 @@
 """Tests for agent.ssl_verify.resolve_httpx_verify."""
 
 import ssl
+from pathlib import Path
+from unittest.mock import patch
 
 import certifi
 import pytest
@@ -47,3 +49,29 @@ def test_outbound_routing_ca_bundle_returns_ssl_context(clean_ca_env):
     result = resolve_httpx_verify()
 
     assert isinstance(result, ssl.SSLContext)
+
+
+def test_outbound_routing_ca_overrides_stale_process_ca(
+    clean_ca_env, monkeypatch, tmp_path
+):
+    process_ca = tmp_path / "process-ca.pem"
+    routing_ca = tmp_path / "routing-ca.pem"
+    ca_contents = Path(certifi.where()).read_text(encoding="utf-8")
+    process_ca.write_text(ca_contents)
+    routing_ca.write_text(ca_contents)
+    monkeypatch.setenv("SSL_CERT_FILE", str(process_ca))
+    register_outbound_routing_provider(
+        lambda: {
+            "HTTPS_PROXY": "http://profile-proxy:14322",
+            "SSL_CERT_FILE": str(routing_ca),
+        }
+    )
+
+    with patch(
+        "agent.ssl_verify.ssl.create_default_context",
+        wraps=ssl.create_default_context,
+    ) as create_context:
+        result = resolve_httpx_verify()
+
+    assert isinstance(result, ssl.SSLContext)
+    create_context.assert_called_once_with(cafile=str(routing_ca))

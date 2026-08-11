@@ -30,9 +30,9 @@ def resolve_httpx_verify(
     Priority:
     1. ``ssl_verify: false`` — disable verification (local dev only)
     2. explicit ``ca_bundle`` (per-provider ``ssl_ca_cert`` config field)
-    3. ``HERMES_CA_BUNDLE``, ``SSL_CERT_FILE``, ``REQUESTS_CA_BUNDLE``,
-       ``CURL_CA_BUNDLE`` env vars
-    4. the same CA variables supplied by the active outbound-routing provider
+    3. CA variables supplied by the active outbound-routing provider
+    4. ``HERMES_CA_BUNDLE``, ``SSL_CERT_FILE``, ``REQUESTS_CA_BUNDLE``,
+       ``CURL_CA_BUNDLE`` process env vars
     5. ``True`` (httpx/certifi default)
 
     ``base_url`` is used only for the insecure-mode warning message.
@@ -46,32 +46,29 @@ def resolve_httpx_verify(
         )
         return False
 
+    from agent.outbound_routing import get_outbound_routing_env
+
+    routing = get_outbound_routing_env()
+    routing_ca = next(
+        (
+            routing.get(key, "").strip()
+            for key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+            if routing.get(key, "").strip()
+        ),
+        "",
+    )
+    # A profile-aware route and its MITM trust root are one configuration.
+    # Prefer that context-local CA over process-global env inherited from the
+    # dispatcher/host profile; otherwise a Kanban worker can select profile B's
+    # proxy while verifying it with profile A's stale CA.
     effective_ca = (
         (ca_bundle or "").strip()
+        or routing_ca
         or os.getenv("HERMES_CA_BUNDLE", "").strip()
         or os.getenv("SSL_CERT_FILE", "").strip()
         or os.getenv("REQUESTS_CA_BUNDLE", "").strip()
         or os.getenv("CURL_CA_BUNDLE", "").strip()
     )
-    if not effective_ca:
-        # Profile-aware routing providers (for example Agent Vault) may supply
-        # trust configuration without mutating the process environment.
-        # Resolve it here so provider clients use the same CA as their proxy.
-        from agent.outbound_routing import get_outbound_routing_env
-
-        routing = get_outbound_routing_env()
-        effective_ca = next(
-            (
-                routing.get(key, "").strip()
-                for key in (
-                    "SSL_CERT_FILE",
-                    "REQUESTS_CA_BUNDLE",
-                    "CURL_CA_BUNDLE",
-                )
-                if routing.get(key, "").strip()
-            ),
-            "",
-        )
     if effective_ca:
         ca_path = str(Path(effective_ca).expanduser())
         if os.path.isfile(ca_path):

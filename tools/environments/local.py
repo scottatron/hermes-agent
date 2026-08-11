@@ -1282,6 +1282,12 @@ def _make_run_env(env: dict) -> dict:
         _resolve_passthrough_value = lambda _name, fallback: fallback  # noqa: E731
 
     merged = dict(os.environ | env)
+    # Foreground LocalEnvironment commands are spawned through this path, not
+    # through _sanitize_subprocess_env(). Resolve profile-aware proxy and trust
+    # settings on every call so multiplexed sessions cannot retain another
+    # profile's route in the persistent shell snapshot.
+    from agent.outbound_routing import apply_outbound_routing_env
+    apply_outbound_routing_env(merged)
     run_env = {}
     for k, v in merged.items():
         if k.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
