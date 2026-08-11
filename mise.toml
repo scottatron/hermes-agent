@@ -30,3 +30,6 @@ run = "aube run --no-install build"
 description = "Build web dashboard"
 dir = "{{config_root}}/web"
 run = "aube run --no-install build"
+
+[tasks.open-desktop]
+run = "open apps/desktop/release/mac-arm64/Hermes.app"
