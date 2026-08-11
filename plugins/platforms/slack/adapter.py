@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import time
 import unicodedata
 from dataclasses import dataclass, field
@@ -691,9 +692,34 @@ def _extract_urls_from_slack_blocks(blocks: list) -> list[str]:
 
 
 def _apply_slack_proxy(client: Any, proxy_url: Optional[str]) -> None:
-    """Apply a resolved proxy to a Slack SDK client or clear it explicitly."""
+    """Apply resolved proxy and CA settings to a Slack SDK client."""
     if hasattr(client, "proxy"):
         client.proxy = proxy_url
+    if hasattr(client, "ssl"):
+        from agent.outbound_routing import get_outbound_routing_env
+
+        routing = get_outbound_routing_env()
+        ca_path = next(
+            (
+                routing.get(key) or os.environ.get(key, "")
+                for key in (
+                    "SSL_CERT_FILE",
+                    "REQUESTS_CA_BUNDLE",
+                    "CURL_CA_BUNDLE",
+                )
+            ),
+            "",
+        )
+        ca_path = str(ca_path).strip()
+        if ca_path and os.path.isfile(ca_path):
+            try:
+                client.ssl = ssl.create_default_context(cafile=ca_path)
+            except ssl.SSLError:
+                logger.warning(
+                    "[Slack] Ignoring invalid CA bundle for Slack transport: %s",
+                    ca_path,
+                    exc_info=True,
+                )
 
 
 # SocketModeClient's own background tasks. Looked up with getattr so a rename

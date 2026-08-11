@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import ssl
+from types import SimpleNamespace
 
 import pytest
 
@@ -72,6 +74,62 @@ def test_agent_vault_plugin_reads_active_secret_scope(monkeypatch):
         assert _resolve_profile_routing()["HTTPS_PROXY"] == "http://profile-proxy:14322"
     finally:
         reset_secret_scope(token)
+
+
+def test_agent_vault_plugin_derives_proxy_from_connection_environment(monkeypatch):
+    monkeypatch.setenv("AGENT_VAULT_ADDR", "https://vault.example.test:18421")
+    monkeypatch.setenv("AGENT_VAULT_TOKEN", "token/with spaces")
+    monkeypatch.setenv("AGENT_VAULT_VAULT", "my/vault")
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+
+    from plugins.agent_vault import _resolve_profile_routing
+
+    routing = _resolve_profile_routing()
+    expected = "http://token%2Fwith%20spaces:my%2Fvault@vault.example.test:18422"
+    assert routing["HTTP_PROXY"] == expected
+    assert routing["HTTPS_PROXY"] == expected
+    assert routing["OPENCLAW_PROXY_URL"] == expected
+    assert routing["NODE_USE_ENV_PROXY"] == "1"
+
+
+def test_agent_vault_plugin_keeps_existing_resolved_environment(monkeypatch):
+    monkeypatch.setenv("AGENT_VAULT_ADDR", "http://vault.example.test:14321")
+    monkeypatch.setenv("AGENT_VAULT_TOKEN", "token")
+    monkeypatch.setenv("AGENT_VAULT_VAULT", "vault")
+    monkeypatch.setenv("HTTPS_PROXY", "http://already-resolved:14322")
+
+    from plugins.agent_vault import _resolve_profile_routing
+
+    assert _resolve_profile_routing()["HTTPS_PROXY"] == "http://already-resolved:14322"
+
+
+def test_agent_vault_plugin_does_not_resolve_partial_configuration(monkeypatch):
+    monkeypatch.setenv("AGENT_VAULT_ADDR", "http://vault.example.test:14321")
+    monkeypatch.delenv("AGENT_VAULT_TOKEN", raising=False)
+    monkeypatch.delenv("AGENT_VAULT_VAULT", raising=False)
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+
+    from plugins.agent_vault import _resolve_profile_routing
+
+    assert "HTTPS_PROXY" not in _resolve_profile_routing()
+
+
+def test_slack_client_receives_agent_vault_ca_context(monkeypatch):
+    ca_file = ssl.get_default_verify_paths().cafile
+    if not ca_file or not os.path.isfile(ca_file):
+        pytest.skip("system CA bundle is unavailable")
+    monkeypatch.setenv("SSL_CERT_FILE", ca_file)
+
+    from plugins.platforms.slack.adapter import _apply_slack_proxy
+
+    client = SimpleNamespace(proxy=None, ssl=None)
+    _apply_slack_proxy(client, "http://127.0.0.1:14322")
+
+    assert client.proxy == "http://127.0.0.1:14322"
+    assert client.ssl is not None
+    assert client.ssl.verify_mode == ssl.CERT_REQUIRED
 
 
 def test_mcp_and_tool_children_receive_profile_routing():
