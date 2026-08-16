@@ -152,12 +152,12 @@ RUN useradd -u 10000 -m -d /opt/data hermes
 COPY --chmod=0755 --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 
 # Node 26: copy the node binary plus the bundled npm JS install from the
-# upstream image.  npm and npx are recreated as symlinks because they're
-# symlinks in the source image (and need to live on PATH).
+# upstream image. npm remains available for the Photon sidecar below, while
+# Hermes' frontend workspaces use aube and aube-lock.yaml.
 #
 # No corepack: Node unbundled it upstream, so node:26 ships only npm in
-# /usr/local/lib/node_modules.  Nothing here needs it — no package.json
-# declares a `packageManager`, and no build step shells out to yarn or pnpm.
+# /usr/local/lib/node_modules. aube is installed separately through mise for
+# the carried frontend toolchain.
 #
 # See node_source stage at the top of the file for the version-bump
 # rationale (#4977).
@@ -166,17 +166,33 @@ COPY --from=node_source /usr/local/lib/node_modules/npm /usr/local/lib/node_modu
 RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
     ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
+# The carried frontend stack uses aube rather than npm. Install it before the
+# dependency layer so the image produces the same linker layout at build time
+# that Hermes expects at runtime.
+RUN curl -fsSL -o /tmp/mise-install.sh https://mise.run && \
+    MISE_INSTALL_PATH=/usr/local/bin/mise sh /tmp/mise-install.sh && \
+    rm /tmp/mise-install.sh
+# AUBE_VERSION is supplied by Talaria's bake file: the fork holds the build,
+# Talaria holds the pin. The default keeps a bare `docker build` here working.
+# The system config is written rather than copied from the repo so later
+# `mise exec -- aube` steps still resolve the tool for every user in the image.
+ARG AUBE_VERSION=2.1.0
+RUN mkdir -p /etc/mise && \
+    printf '[tools]\naube = "%s"\n' "${AUBE_VERSION}" > /etc/mise/config.toml && \
+    mise install --system
+ENV PATH="/usr/local/share/mise/installs/aube/${AUBE_VERSION}/bin:${PATH}"
+
 WORKDIR /opt/hermes
 
 # ---------- Layer-cached dependency install ----------
-# Copy only package manifests first so npm install + Playwright are cached
+# Copy only package manifests first so aube install + Playwright are cached
 # unless the lockfiles themselves change.
 #
 # ui-tui/packages/hermes-ink/ is copied IN FULL (not just its manifests)
 # because it is referenced as a `file:` workspace dependency from
 # ui-tui/package.json.  Copying the tree up front lets npm resolve the
 # workspace to real content instead of stopping at a bare package.json.
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json aube-lock.yaml ./
 COPY web/package.json web/
 COPY ui-tui/package.json ui-tui/
 COPY ui-tui/packages/hermes-ink/ ui-tui/packages/hermes-ink/
@@ -184,21 +200,12 @@ COPY ui-tui/packages/hermes-ink/ ui-tui/packages/hermes-ink/
 # `file:` workspace dependency (same pattern as hermes-ink above).
 COPY apps/shared/ apps/shared/
 
-# `npm_config_install_links=false` forces npm to install `file:` deps as
-# symlinks instead of copies.  This is the default since npm 10+, which is
-# what the image ships now (via the node:22 source stage).  We set it
-# explicitly anyway as defense-in-depth: the previous Debian-bundled npm
-# 9.x defaulted to install-as-copy, which produced a hidden
-# node_modules/.package-lock.json that permanently disagreed with the root
-# lock on the @hermes/ink entry, tripped the TUI launcher's
-# `_tui_need_npm_install()` check on every startup, and triggered a
-# runtime `npm install` that then failed with EACCES.  Keeping the env
-# guards against a future regression if the source npm version changes.
-ENV npm_config_install_links=false
-
-RUN npm install --prefer-offline --no-audit --fetch-retries=5 && \
+# aube uses its own linker and lockfile. Keep it as the source of truth rather
+# than creating an npm-shaped tree that the runtime's aube-aware freshness
+# checks will treat as stale.
+RUN mise exec -- aube install --filter ./web... --filter ./ui-tui... && \
     for i in 1 2 3; do \
-        npx playwright install --with-deps chromium --only-shell && break || \
+        mise exec -- npx playwright install --with-deps chromium --only-shell && break || \
         { [ "$i" = 3 ] && exit 1; echo "playwright install failed (attempt $i); retrying in 10s"; sleep 10; }; \
     done && \
     npm cache clean --force
@@ -272,8 +279,8 @@ RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra 
 COPY web/ web/
 COPY ui-tui/ ui-tui/
 COPY apps/shared/ apps/shared/
-RUN cd web && npm run build && \
-    cd ../ui-tui && npm run build
+RUN cd web && mise exec -- aube run --no-install build && \
+    cd ../ui-tui && mise exec -- aube run --no-install build
 
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.
