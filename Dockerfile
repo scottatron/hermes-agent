@@ -197,7 +197,7 @@ COPY apps/shared/ apps/shared/
 # aube uses its own linker and lockfile. Keep it as the source of truth rather
 # than creating an npm-shaped tree that the runtime's aube-aware freshness
 # checks will treat as stale.
-RUN aube install --filter ./web... --filter ./ui-tui... && \
+RUN mise exec -- aube install --filter ./web... --filter ./ui-tui... && \
     for i in 1 2 3; do \
         aube exec -- npx playwright install --with-deps chromium --only-shell && break || \
         { [ "$i" = 3 ] && exit 1; echo "playwright install failed (attempt $i); retrying in 10s"; sleep 10; }; \
@@ -273,8 +273,8 @@ RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra 
 COPY web/ web/
 COPY ui-tui/ ui-tui/
 COPY apps/shared/ apps/shared/
-RUN cd web && aube run --no-install build && \
-    cd ../ui-tui && aube run --no-install build
+RUN cd web && mise exec -- aube run --no-install build && \
+    cd ../ui-tui && mise exec -- aube run --no-install build
 
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.
