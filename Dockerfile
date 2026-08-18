@@ -199,7 +199,7 @@ COPY apps/shared/ apps/shared/
 # checks will treat as stale.
 RUN mise exec -- aube install --filter ./web... --filter ./ui-tui... && \
     for i in 1 2 3; do \
-        aube exec -- npx playwright install --with-deps chromium --only-shell && break || \
+        mise exec -- npx playwright install --with-deps chromium --only-shell && break || \
         { [ "$i" = 3 ] && exit 1; echo "playwright install failed (attempt $i); retrying in 10s"; sleep 10; }; \
     done && \
     npm cache clean --force
