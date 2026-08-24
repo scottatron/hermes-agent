@@ -546,8 +546,8 @@ def test_refresh_429_classified_as_quota_not_auth_failure(monkeypatch):
     assert "hermes auth" not in rendered
 
 
-def test_refresh_uses_shared_tls_resolver(monkeypatch):
-    """Codex token refresh must honor profile-scoped outbound CA routing."""
+def test_refresh_uses_shared_tls_and_proxy_routing(monkeypatch):
+    """Codex refresh must honor profile-scoped CA and proxy routing."""
     response = _StubHTTPResponse(200, {"access_token": "refreshed-access"})
     captured = {}
 
@@ -561,11 +561,17 @@ def test_refresh_uses_shared_tls_resolver(monkeypatch):
         "agent.ssl_verify.resolve_httpx_verify",
         lambda: expected_verify,
     )
+    monkeypatch.setattr(
+        "agent.outbound_routing.get_outbound_routing_env",
+        lambda: {"HTTPS_PROXY": "http://agent-vault-proxy:14322"},
+    )
 
     refreshed = refresh_codex_oauth_pure("old-access", "refresh-token")
 
     assert refreshed["access_token"] == "refreshed-access"
     assert captured["verify"] is expected_verify
+    assert captured["proxy"] == "http://agent-vault-proxy:14322"
+    assert captured["trust_env"] is False
 
 
 def test_refresh_429_without_retry_after_header(monkeypatch):
@@ -629,6 +635,5 @@ def _patch_httpx_post(monkeypatch, responses):
             return next(seq)
 
     monkeypatch.setattr("hermes_cli.auth.httpx.Client", lambda *a, **k: _FakeClient())
-
 
 
