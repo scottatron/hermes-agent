@@ -65,6 +65,19 @@ def _install_sidecar_publisher() -> None:
     )
 
 
+def _discover_plugins_for_startup() -> None:
+    """Load enabled plugins before the first TUI agent can be built.
+
+    The parent CLI intentionally skips plugin discovery for the TUI because
+    this backend owns its startup.  Keep this synchronous: outbound-routing
+    providers must be registered before Codex auth refresh or any model client
+    is initialized.
+    """
+    from hermes_cli.plugins import discover_plugins
+
+    discover_plugins()
+
+
 # How long to wait for orderly shutdown (atexit + finalisers) before
 # falling back to ``os._exit(0)`` so a wedged worker mid-flush can't
 # strand the process.  1s covers the gateway's own shutdown work
@@ -421,6 +434,13 @@ def ensure_mcp_discovery_started() -> None:
 
 def main():
     _install_sidecar_publisher()
+
+    # Carried (Talaria patch 4): discovery must run before the first agent is
+    # built so outbound-routing providers are registered.
+    try:
+        _discover_plugins_for_startup()
+    except Exception:
+        logger.warning("TUI plugin discovery failed", exc_info=True)
 
     # Cross-backend liveness (#94895): register a heartbeat row so the
     # startup orphan sweep can distinguish "row owned by a live but idle

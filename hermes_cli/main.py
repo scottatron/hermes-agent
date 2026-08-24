@@ -2882,8 +2882,12 @@ def _launch_tui(
 
     # TUI child is a hermes process: propagate the profile-home contract via
     # the single factory; keep secrets (the TUI/agent needs provider creds).
-    from tools.environments.local import build_subprocess_env
-    env = build_subprocess_env(scrub_secrets=False, inherit_profile_home=True)
+    from tools.environments.local import build_subprocess_env, hermes_subprocess_env
+    env = build_subprocess_env(
+        hermes_subprocess_env(inherit_credentials=True),
+        scrub_secrets=False,
+        inherit_profile_home=True,
+    )
     try:
         from hermes_cli.config import apply_terminal_config_to_env
         apply_terminal_config_to_env(env=env)

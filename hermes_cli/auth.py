@@ -4019,14 +4019,39 @@ def refresh_codex_oauth_pure(
             relogin_required=True,
         )
 
+    # The Codex token endpoint can itself sit behind a profile-scoped outbound
+    # router (for example Agent Vault).  Use the same CA resolution as the
+    # inference clients instead of letting httpx fall back to process-global
+    # trust settings, which may point at a different profile's bundle.
+    from agent.ssl_verify import resolve_httpx_verify
+    from agent.outbound_routing import get_outbound_routing_env
+
     timeout = httpx.Timeout(max(5.0, float(timeout_seconds)))
-    with httpx.Client(
-        timeout=timeout,
-        headers={
+    client_kwargs = {
+        "timeout": timeout,
+        "verify": resolve_httpx_verify(),
+        "headers": {
             "Accept": "application/json",
             "User-Agent": CODEX_OAUTH_USER_AGENT,
         },
-    ) as client:
+    }
+    # The TUI child discovers routing providers after it inherits the parent
+    # environment. Explicitly pass the active provider's proxy so httpx does
+    # not silently use a stale process-global proxy alongside the right CA.
+    routing = get_outbound_routing_env()
+    proxy = next(
+        (
+            routing.get(key, "").strip()
+            for key in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")
+            if routing.get(key, "").strip()
+        ),
+        "",
+    )
+    if proxy:
+        client_kwargs["proxy"] = proxy
+        client_kwargs["trust_env"] = False
+
+    with httpx.Client(**client_kwargs) as client:
         response = client.post(
             CODEX_OAUTH_TOKEN_URL,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
