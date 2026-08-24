@@ -297,9 +297,31 @@ def refresh_codex_oauth_pure(
     if not _nonempty_str(refresh_token):
         raise _codex_err(
             _MISSING_REFRESH_TOKEN_MSG, "codex_auth_missing_refresh_token", relogin=True)
-    with _codex_http_client(
-        timeout=httpx.Timeout(max(5.0, float(timeout_seconds))),
-        headers={"Accept": "application/json", "User-Agent": CODEX_OAUTH_USER_AGENT}) as client:
+    # The token endpoint may sit behind a profile-scoped outbound router. Use
+    # the same CA and explicit proxy as inference clients instead of falling
+    # back to process-global trust/proxy settings from another profile.
+    from agent.outbound_routing import get_outbound_routing_env
+    from agent.ssl_verify import resolve_httpx_verify
+
+    client_kwargs = {
+        "timeout": httpx.Timeout(max(5.0, float(timeout_seconds))),
+        "verify": resolve_httpx_verify(),
+        "headers": {"Accept": "application/json", "User-Agent": CODEX_OAUTH_USER_AGENT},
+    }
+    routing = get_outbound_routing_env()
+    proxy = next(
+        (
+            routing.get(key, "").strip()
+            for key in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")
+            if routing.get(key, "").strip()
+        ),
+        "",
+    )
+    if proxy:
+        client_kwargs["proxy"] = proxy
+        client_kwargs["trust_env"] = False
+
+    with _codex_http_client(**client_kwargs) as client:
         response = client.post(
             CODEX_OAUTH_TOKEN_URL, headers={"Content-Type": "application/x-www-form-urlencoded"},
             data={

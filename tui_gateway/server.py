@@ -1031,6 +1031,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
             _announce_built_agent(sid, key, current, agent)
         except Exception as e:
             current["agent_error"] = str(e)
+            logger.exception("Agent initialization failed for session %s", sid)
             _emit("error", sid, {"message": f"agent init failed: {e}"})
         finally:
             _finish_agent_build(

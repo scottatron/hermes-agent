@@ -42,6 +42,19 @@ def _install_sidecar_publisher() -> None:
     server._stdio_transport = TeeTransport(server._stdio_transport, WsPublisherTransport(url))
 
 
+def _discover_plugins_for_startup() -> None:
+    """Load enabled plugins before the first TUI agent can be built.
+
+    The parent CLI intentionally skips plugin discovery for the TUI because
+    this backend owns its startup.  Keep this synchronous: outbound-routing
+    providers must be registered before Codex auth refresh or any model client
+    is initialized.
+    """
+    from hermes_cli.plugins import discover_plugins
+
+    discover_plugins()
+
+
 # Grace for orderly shutdown before ``os._exit(0)`` so a worker wedged mid-flush can't
 # strand the process; ``HERMES_TUI_GATEWAY_SHUTDOWN_GRACE_S`` overrides.
 _DEFAULT_SHUTDOWN_GRACE_S = 1.0
@@ -240,6 +253,12 @@ def _write_or_exit(payload: dict, reason: str) -> None:
 
 def main():
     _install_sidecar_publisher()
+
+    # Routing providers must be registered before the first agent is built.
+    try:
+        _discover_plugins_for_startup()
+    except Exception:
+        logger.warning("TUI plugin discovery failed", exc_info=True)
 
     # The heartbeat row lets the orphan sweep tell "live but idle" from "truly orphaned",
     # so it must start BEFORE the sweep.
