@@ -3865,9 +3865,16 @@ def refresh_codex_oauth_pure(
             relogin_required=True,
         )
 
+    # The Codex token endpoint can itself sit behind a profile-scoped outbound
+    # router (for example Agent Vault).  Use the same CA resolution as the
+    # inference clients instead of letting httpx fall back to process-global
+    # trust settings, which may point at a different profile's bundle.
+    from agent.ssl_verify import resolve_httpx_verify
+
     timeout = httpx.Timeout(max(5.0, float(timeout_seconds)))
     with httpx.Client(
         timeout=timeout,
+        verify=resolve_httpx_verify(),
         headers={
             "Accept": "application/json",
             "User-Agent": CODEX_OAUTH_USER_AGENT,

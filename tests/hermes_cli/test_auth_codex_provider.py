@@ -546,6 +546,28 @@ def test_refresh_429_classified_as_quota_not_auth_failure(monkeypatch):
     assert "hermes auth" not in rendered
 
 
+def test_refresh_uses_shared_tls_resolver(monkeypatch):
+    """Codex token refresh must honor profile-scoped outbound CA routing."""
+    response = _StubHTTPResponse(200, {"access_token": "refreshed-access"})
+    captured = {}
+
+    def _factory(*args, **kwargs):
+        captured.update(kwargs)
+        return _StubHTTPClient(response)
+
+    expected_verify = object()
+    monkeypatch.setattr("hermes_cli.auth.httpx.Client", _factory)
+    monkeypatch.setattr(
+        "agent.ssl_verify.resolve_httpx_verify",
+        lambda: expected_verify,
+    )
+
+    refreshed = refresh_codex_oauth_pure("old-access", "refresh-token")
+
+    assert refreshed["access_token"] == "refreshed-access"
+    assert captured["verify"] is expected_verify
+
+
 def test_refresh_429_without_retry_after_header(monkeypatch):
     """429 without a Retry-After header still classifies as quota, no relogin."""
     from hermes_cli.auth import CODEX_RATE_LIMITED_CODE
@@ -607,7 +629,6 @@ def _patch_httpx_post(monkeypatch, responses):
             return next(seq)
 
     monkeypatch.setattr("hermes_cli.auth.httpx.Client", lambda *a, **k: _FakeClient())
-
 
 
 
