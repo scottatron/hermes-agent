@@ -37,6 +37,11 @@ def _run_main(monkeypatch, events, *, prewarm=None):
     and ``("prewarm",)`` when the spy fires, in call order.
     """
     monkeypatch.setattr(entry, "_install_sidecar_publisher", lambda: None)
+    monkeypatch.setattr(
+        entry,
+        "_discover_plugins_for_startup",
+        lambda: events.append(("plugins",)),
+    )
     monkeypatch.setattr(entry, "ensure_mcp_discovery_started", lambda: None)
     monkeypatch.setattr(entry, "resolve_skin", lambda: "default")
     monkeypatch.setattr(entry.server, "_ensure_skin_watcher", lambda: None)
@@ -99,3 +104,12 @@ def test_main_survives_prewarm_failure(monkeypatch):
 
     assert ("prewarm",) in events
     assert ("write", "gateway.ready") in events
+
+
+def test_main_discovers_plugins_before_gateway_ready(monkeypatch):
+    """Routing providers must be registered before the first client can start."""
+    events: list[tuple] = []
+
+    _run_main(monkeypatch, events)
+
+    assert events.index(("plugins",)) < events.index(("write", "gateway.ready"))

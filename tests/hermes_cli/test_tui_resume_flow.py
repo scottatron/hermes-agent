@@ -220,6 +220,16 @@ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     captured = {}
     active_path_during_call = None
 
+    from tools.environments import local as local_env
+    monkeypatch.setattr(
+        local_env,
+        "hermes_subprocess_env",
+        lambda **_kwargs: {
+            "HTTPS_PROXY": "http://profile-proxy:14322",
+            "SSL_CERT_FILE": "/tmp/profile-ca.pem",
+        },
+    )
+
     monkeypatch.setattr(
         main_mod,
         "_make_tui_argv",
@@ -252,6 +262,8 @@ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     assert active_path_during_call == active_path
     assert not active_path.exists()
     assert env["NODE_ENV"] == "production"
+    assert env["HTTPS_PROXY"] == "http://profile-proxy:14322"
+    assert env["SSL_CERT_FILE"] == "/tmp/profile-ca.pem"
 
 
 
@@ -282,7 +294,6 @@ def test_make_tui_argv_dev_prebuilds_hermes_ink(monkeypatch, main_mod, tmp_path)
     assert argv == [str(tsx), "src/entry.tsx"]
     assert cwd == tui_dir
     assert calls == [(["/usr/bin/npm", "run", "build"], str(ink_dir))]
-
 
 
 
