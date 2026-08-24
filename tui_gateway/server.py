@@ -2835,6 +2835,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
             _schedule_mcp_late_refresh(sid, agent)
         except Exception as e:
             current["agent_error"] = str(e)
+            logger.exception("Agent initialization failed for session %s", sid)
             _emit("error", sid, {"message": f"agent init failed: {e}"})
         finally:
             if home_token is not None:

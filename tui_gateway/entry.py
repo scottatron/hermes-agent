@@ -64,6 +64,19 @@ def _install_sidecar_publisher() -> None:
     )
 
 
+def _discover_plugins_for_startup() -> None:
+    """Load enabled plugins before the first TUI agent can be built.
+
+    The parent CLI intentionally skips plugin discovery for the TUI because
+    this backend owns its startup.  Keep this synchronous: outbound-routing
+    providers must be registered before Codex auth refresh or any model client
+    is initialized.
+    """
+    from hermes_cli.plugins import discover_plugins
+
+    discover_plugins()
+
+
 # How long to wait for orderly shutdown (atexit + finalisers) before
 # falling back to ``os._exit(0)`` so a wedged worker mid-flush can't
 # strand the process.  1s covers the gateway's own shutdown work
@@ -420,6 +433,11 @@ def ensure_mcp_discovery_started() -> None:
 
 def main():
     _install_sidecar_publisher()
+
+    try:
+        _discover_plugins_for_startup()
+    except Exception:
+        logger.warning("TUI plugin discovery failed", exc_info=True)
 
     # One-time sweep of session rows orphaned by a previous gateway process
     # (#65194) — the in-process WS-orphan reap timer dies with the process.
