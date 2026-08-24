@@ -1,6 +1,3 @@
-[deps.uv]
-[deps.aube]
-
 [tools]
 aube = "latest"
 node = "26"
@@ -15,6 +12,10 @@ run = "uv sync --extra hindsight --extra slack --extra web --extra edge-tts --ex
 [tasks.symlink-core-bin]
 description = "Symlink hermes bin into ~/.local/bin"
 run = "ln -fs {{config_root}}/.venv/bin/hermes {{env.HOME}}/.local/bin/hermes"
+
+[tasks.aube-install]
+description = "Install aube deps"
+run = "aube install --fix-lockfile"
 
 [tasks.build-desktop]
 description = "Build Desktop app"
