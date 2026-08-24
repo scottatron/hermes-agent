@@ -93,15 +93,27 @@ def test_agent_vault_plugin_derives_proxy_from_connection_environment(monkeypatc
     assert routing["NODE_USE_ENV_PROXY"] == "1"
 
 
-def test_agent_vault_plugin_keeps_existing_resolved_environment(monkeypatch):
+def test_agent_vault_plugin_prefers_connection_tuple_over_inherited_route(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("AGENT_VAULT_ADDR", "http://vault.example.test:14321")
     monkeypatch.setenv("AGENT_VAULT_TOKEN", "token")
     monkeypatch.setenv("AGENT_VAULT_VAULT", "vault")
     monkeypatch.setenv("HTTPS_PROXY", "http://already-resolved:14322")
+    monkeypatch.setenv("SSL_CERT_FILE", "/tmp/stale-ca.pem")
+    ca_path = tmp_path / ".agent-vault" / "mitm-ca.pem"
+    ca_path.parent.mkdir()
+    ca_path.write_text("test ca")
 
-    from plugins.agent_vault import _resolve_profile_routing
+    from plugins import agent_vault
 
-    assert _resolve_profile_routing()["HTTPS_PROXY"] == "http://already-resolved:14322"
+    monkeypatch.setattr(agent_vault.Path, "home", staticmethod(lambda: tmp_path))
+
+    routing = agent_vault._resolve_profile_routing()
+
+    expected = "http://token:vault@vault.example.test:14322"
+    assert routing["HTTPS_PROXY"] == expected
+    assert routing["SSL_CERT_FILE"] == str(ca_path)
 
 
 def test_agent_vault_plugin_does_not_resolve_partial_configuration(monkeypatch):

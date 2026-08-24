@@ -71,11 +71,15 @@ def _resolve_profile_routing() -> Mapping[str, str]:
     # The core outbound-routing registry owns the allowlist. Returning the
     # active scope here keeps new generic routing keys out of this vendor
     # plugin and prevents the two sides from drifting.
-    resolved = (
-        source
-        if any(source.get(key) for key in ("HTTP_PROXY", "HTTPS_PROXY"))
-        else _agent_vault_proxy_env(source)
+    # When the connection tuple is available, it is authoritative. A parent
+    # process may already have injected a proxy and a different CA bundle;
+    # preserving those values would route through Agent Vault while verifying
+    # its MITM certificate with the wrong trust root.
+    has_connection = all(
+        str(source.get(key, "")).strip()
+        for key in (_AGENT_VAULT_ADDR, _AGENT_VAULT_TOKEN, _AGENT_VAULT_VAULT)
     )
+    resolved = _agent_vault_proxy_env(source) if has_connection else source
     if not any(resolved.get(key) for key in _CA_ENV_KEYS):
         ca_path = Path.home() / ".agent-vault" / "mitm-ca.pem"
         if ca_path.is_file():
