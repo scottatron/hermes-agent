@@ -350,7 +350,9 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
             scrubbed = scrub_kanban_env(scrubbed)
     except Exception:
         pass
-    return scrubbed
+
+    from agent.outbound_routing import apply_outbound_routing_env
+    return apply_outbound_routing_env(scrubbed)
 
 
 def check_sandbox_requirements() -> bool:
