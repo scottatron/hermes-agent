@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import base64
+import json
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -31,7 +32,7 @@ from hermes_cli.dashboard_auth import (
     register_provider,
 )
 from hermes_cli.dashboard_auth import native_flow
-from hermes_cli.dashboard_auth.base import Session
+from hermes_cli.dashboard_auth.base import ProviderError, Session
 from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
 
 
@@ -588,3 +589,82 @@ def test_native_refresh_dead_token_returns_401(gated_client):
     )
     assert r.status_code == 401
     assert r.json()["error"] == "session_expired"
+
+
+class _UnreachableProvider(StubAuthProvider):
+    """Stub whose IdP is refusing to answer (429, 5xx, transport failure)."""
+
+    def refresh_session(self, *, refresh_token: str) -> Session:
+        raise ProviderError("OIDC token endpoint returned 429: 'rate limited'")
+
+
+@pytest.fixture
+def unreachable_client(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    clear_providers()
+    register_provider(_UnreachableProvider())
+    prev_required = getattr(web_server.app.state, "auth_required", None)
+    web_server.app.state.auth_required = True
+    client = TestClient(
+        web_server.app, base_url="https://fly-app.fly.dev",
+        follow_redirects=False,
+    )
+    yield client, home
+    clear_providers()
+    web_server.app.state.auth_required = prev_required
+
+
+def test_native_refresh_unreachable_provider_is_audited(unreachable_client):
+    """A refusing IdP must reach the audit log, with the caller identified.
+
+    The 503 returns before the ``all_providers_rejected_rt`` audit at the end of
+    the handler, so without an audit call in the ProviderError branch this
+    failure mode is absent from the audit stream entirely — and the application
+    log that does record it carries no caller identity. That combination makes a
+    client stuck in a refresh retry loop impossible to attribute.
+    """
+    client, home = unreachable_client
+
+    r = client.post(
+        "/auth/native/refresh",
+        json={"refresh_token": "rt-that-cannot-be-checked", "provider": "stub"},
+        headers={
+            "user-agent": "HermesDesktop/1.2.3",
+            "x-forwarded-for": "100.126.95.78",
+        },
+    )
+    assert r.status_code == 503, r.text
+
+    path = home / "logs" / "dashboard-auth.log"
+    assert path.exists(), "ProviderError branch wrote nothing to the audit log"
+    entries = [json.loads(line) for line in path.read_text().strip().splitlines()]
+    failures = [e for e in entries if e["event"] == "refresh_failure"]
+    assert failures, f"no refresh_failure audited; got {entries}"
+
+    entry = failures[-1]
+    assert entry["reason"] == "provider_unreachable"
+    assert entry["provider"] == "stub"
+    assert entry["ip"] == "100.126.95.78"
+    assert entry["user_agent"] == "HermesDesktop/1.2.3"
+
+
+def test_native_refresh_audit_bounds_user_agent(unreachable_client):
+    """User-Agent is client-controlled, so it is length-bounded before storage."""
+    client, home = unreachable_client
+
+    client.post(
+        "/auth/native/refresh",
+        json={"refresh_token": "rt", "provider": "stub"},
+        headers={"user-agent": "A" * 5000},
+    )
+
+    entries = [
+        json.loads(line)
+        for line in (home / "logs" / "dashboard-auth.log").read_text().strip().splitlines()
+    ]
+    entry = [e for e in entries if e["event"] == "refresh_failure"][-1]
+    assert len(entry["user_agent"]) == 200
