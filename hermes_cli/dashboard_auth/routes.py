@@ -112,6 +112,22 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
+_USER_AGENT_MAX_LEN = 200
+
+
+def _client_user_agent(request: Request) -> str:
+    """Bounded User-Agent for audit records.
+
+    Source IP alone is not a client identity: behind NAT, a shared egress proxy,
+    or a mesh-VPN subnet router, several distinct applications present the same
+    address. The User-Agent is what separates, say, a native desktop client from
+    a third-party mobile one when attributing a refresh loop.
+
+    Client-controlled, so it is length-bounded and never parsed.
+    """
+    return request.headers.get("user-agent", "")[:_USER_AGENT_MAX_LEN]
+
+
 def _prefix(request: Request) -> str:
     """Resolve the X-Forwarded-Prefix header for the active request.
 
@@ -1061,6 +1077,21 @@ async def auth_native_refresh(request: Request, body: _NativeRefreshBody):
             _log.warning(
                 "dashboard-auth: provider %r unreachable during native refresh: %s",
                 provider.name, e,
+            )
+            # Mirrors the verify and refresh paths in middleware.py, which
+            # already audit this. Without it the ProviderError branch reaches
+            # only the application log: the 503 raised below returns before the
+            # ``all_providers_rejected_rt`` audit at the end of this function, so
+            # an unreachable provider never appears in the audit stream at all.
+            # A client stuck retrying a refresh is then invisible to anything
+            # reading the audit log, and unattributable in the application log,
+            # which records no caller identity.
+            audit_log(
+                AuditEvent.REFRESH_FAILURE,
+                provider=provider.name,
+                reason="provider_unreachable",
+                ip=_client_ip(request),
+                user_agent=_client_user_agent(request),
             )
             continue
         audit_log(
