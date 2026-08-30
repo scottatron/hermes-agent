@@ -63,6 +63,14 @@ def _audit(request: Request, event: AuditEvent, **fields) -> None:
     audit_log(event, **fields, ip=_client_ip(request))
 
 
+_USER_AGENT_MAX_LEN = 200
+
+
+def _client_user_agent(request: Request) -> str:
+    """Bounded, client-controlled User-Agent for audit attribution."""
+    return request.headers.get("user-agent", "")[:_USER_AGENT_MAX_LEN]
+
+
 def _redirect_uri(request: Request) -> str:
     """Absolute ``/auth/callback`` URL handed to the IDP. An operator-declared public URL is the
     complete authority (``X-Forwarded-Prefix`` ignored so a baked-in prefix is not doubled);
@@ -487,10 +495,17 @@ async def auth_native_refresh(request: Request, body: _NativeRefreshBody):
     unreachable -> 503."""
     if not body.refresh_token:
         raise _http(400, "refresh_token required")
+
+    def _audit_unreachable(provider) -> None:
+        _audit(
+            request, AuditEvent.REFRESH_FAILURE, provider=provider.name,
+            reason="provider_unreachable", user_agent=_client_user_agent(request))
+
     try:
         session = scan_session_providers(
             body.provider, lambda p: p.refresh_session(refresh_token=body.refresh_token),
-            phase="native refresh", log=_log, swallow=(RefreshExpiredError,))
+            phase="native refresh", log=_log, swallow=(RefreshExpiredError,),
+            on_unreachable=_audit_unreachable)
     except ProviderError as e:
         raise _http(503, f"Auth provider {str(e)!r} unreachable")
     if session is not None:
