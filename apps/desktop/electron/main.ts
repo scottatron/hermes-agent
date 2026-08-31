@@ -7569,6 +7569,35 @@ function postJsonNoAuth(url: string, body: unknown, opts: any = {}) {
   return fetchJson(url, null, { method: 'POST', body: resolveJsonBody(body), ...opts })
 }
 
+// When a refresh may next be attempted per gateway, after the provider told us
+// to back off. See ensureNativeAccessToken.
+const _nativeRefreshBlockedUntil = new Map<string, number>()
+
+// In-flight refresh per gateway, so concurrent callers share one request.
+const _nativeRefreshInFlight = new Map<string, Promise<string | null>>()
+
+const NATIVE_REFRESH_BACKOFF_MS = 30_000
+const NATIVE_REFRESH_RATE_LIMIT_BACKOFF_MS = 60_000
+const NATIVE_REFRESH_MAX_BACKOFF_MS = 3_600_000
+
+// Parse a Retry-After expressed in delta-seconds. HTTP-date form is not
+// supported: the gateway never sends it, and guessing at a malformed value is
+// worse than falling back to a fixed window.
+function nativeRefreshRetryAfterMs(error: any): number | null {
+  const raw =
+    error?.headers?.['retry-after'] ??
+    error?.headers?.['Retry-After'] ??
+    error?.response?.headers?.['retry-after']
+
+  const seconds = Number.parseInt(String(raw ?? '').trim(), 10)
+
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return null
+  }
+
+  return Math.min(seconds * 1000, NATIVE_REFRESH_MAX_BACKOFF_MS)
+}
+
 // Return a valid native access token for baseUrl, refreshing via
 // /auth/native/refresh if the stored one is at/near expiry. Returns null when
 // there are no tokens or the refresh is terminally rejected (caller re-logins).
@@ -7590,6 +7619,43 @@ async function ensureNativeAccessToken(baseUrl: string): Promise<string | null> 
     return null
   }
 
+  // Honour a backoff the provider already asked for. This function runs on
+  // EVERY authenticated request, so without a window here an unavailable
+  // provider costs one upstream token request per API call for as long as the
+  // app is open — which is exactly how an expired token turned into a sustained
+  // retry storm against a rate-limited IDP.
+  const blockedUntil = _nativeRefreshBlockedUntil.get(baseUrl)
+
+  if (blockedUntil !== undefined) {
+    if (Date.now() < blockedUntil) {
+      return tokens.accessToken
+    }
+
+    _nativeRefreshBlockedUntil.delete(baseUrl)
+  }
+
+  // Single-flight: the callers of this function fan out (status polls, socket
+  // reconnects, per-request headers), and without this each one issues its own
+  // refresh against the same gateway.
+  const inFlight = _nativeRefreshInFlight.get(baseUrl)
+
+  if (inFlight) {
+    return inFlight
+  }
+
+  const attempt = _refreshNativeAccessToken(baseUrl, tokens).finally(() => {
+    _nativeRefreshInFlight.delete(baseUrl)
+  })
+
+  _nativeRefreshInFlight.set(baseUrl, attempt)
+
+  return attempt
+}
+
+async function _refreshNativeAccessToken(
+  baseUrl: string,
+  tokens: NativeTokenSet
+): Promise<string | null> {
   try {
     const body = await postJsonNoAuth(
       nativeRefreshUrl(baseUrl),
@@ -7599,15 +7665,36 @@ async function ensureNativeAccessToken(baseUrl: string): Promise<string | null> 
 
     const rotated = parseTokenResponse(body)
     _storeNativeTokens(baseUrl, rotated)
+    _nativeRefreshBlockedUntil.delete(baseUrl)
 
     return rotated.accessToken
   } catch (error: any) {
     // A 401 means the RT is dead (session_expired) — drop tokens so the UI
-    // prompts a fresh native login. A 503/transient keeps them for a retry.
+    // prompts a fresh native login.
     if (error && error.statusCode === 401) {
       _clearNativeTokens(baseUrl)
 
       return null
+    }
+
+    // 503 and 429 both mean "the provider did not answer, keep the tokens and
+    // come back later". The gateway reports an upstream 429 as a 503
+    // `Auth provider unreachable`, so 503 is the common case and neither may be
+    // treated as licence to retry on the very next request. Clearing the tokens
+    // would be wrong too: it forces an interactive sign-in through the same
+    // upstream that just refused the refresh.
+    if (error && (error.statusCode === 503 || error.statusCode === 429)) {
+      const fallback =
+        error.statusCode === 429
+          ? NATIVE_REFRESH_RATE_LIMIT_BACKOFF_MS
+          : NATIVE_REFRESH_BACKOFF_MS
+
+      _nativeRefreshBlockedUntil.set(
+        baseUrl,
+        Date.now() + (nativeRefreshRetryAfterMs(error) ?? fallback)
+      )
+
+      return tokens.accessToken
     }
 
     throw error
