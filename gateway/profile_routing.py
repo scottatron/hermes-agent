@@ -65,6 +65,7 @@ class ProfileRoute:
     enabled: bool = True
     bot_profile: Optional[str] = None  # None = the default profile's bot
     user_id: Optional[str] = None
+    authorized_users: tuple[str, ...] = ()  # Route-scoped sender grant; empty preserves transport auth.
 
     @property
     def specificity(self) -> int:
@@ -157,6 +158,15 @@ def parse_profile_routes(raw: Optional[List[Dict[str, Any]]]) -> List[ProfileRou
         if has_user_id and (user_id is None or isinstance(user_id, str) and not user_id.strip()):
             logger.warning("Skipping profile route %s: user_id cannot be null or empty", name)
             continue
+        authorized_users = entry.get("authorized_users") or []
+        if not isinstance(authorized_users, (list, tuple)) or not all(
+            isinstance(value, str) and value.strip() for value in authorized_users
+        ):
+            logger.warning("Skipping profile route %s: authorized_users must be a list of non-empty strings", name)
+            continue
+        if authorized_users and not entry.get("chat_id"):
+            logger.warning("Skipping profile route %s: authorized_users requires chat_id", name)
+            continue
         routes.append(ProfileRoute(
             name=name, platform=platform, profile=profile,
             guild_id=_coerce_route_id(entry.get("guild_id")),
@@ -165,6 +175,7 @@ def parse_profile_routes(raw: Optional[List[Dict[str, Any]]]) -> List[ProfileRou
             user_id=_coerce_route_id(user_id),
             enabled=entry.get("enabled", True),
             bot_profile=_bot_profile_key(entry.get("bot_profile")),
+            authorized_users=tuple(value.strip() for value in authorized_users),
         ))
     routes.sort(key=lambda r: r.specificity, reverse=True)
     logger.debug("Loaded %d profile routes (most-specific-first)", len(routes))

@@ -89,6 +89,19 @@ class TestProfileRouteMatching:
 
 
 class TestParseProfileRoutes:
+    def test_authorized_users_requires_chat_scope_and_roundtrips(self):
+        from gateway.config import GatewayConfig
+
+        assert parse_profile_routes([
+            {"name": "broad", "platform": "slack", "profile": "reviewer",
+             "authorized_users": ["*"]},
+        ]) == []
+        routes = parse_profile_routes([
+            {"name": "review", "platform": "slack", "chat_id": "C_REVIEW",
+             "profile": "reviewer", "authorized_users": ["*"]},
+        ])
+        assert GatewayConfig.from_dict(GatewayConfig(profile_routes=routes).to_dict()).profile_routes == routes
+
     def test_empty(self):
         assert parse_profile_routes(None) == []
         assert parse_profile_routes([]) == []

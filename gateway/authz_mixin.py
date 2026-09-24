@@ -643,6 +643,25 @@ class GatewayAuthorizationMixin:
         if not user_id:
             return False
 
+        # A shared bot can deliberately admit senders for one routed chat without widening its
+        # transport-wide allowlist. Require the selected route and runtime profile to agree: a
+        # stale or hand-built source must not turn this into a grant for the default profile.
+        if is_group and source.chat_id and not source.is_bot and getattr(self.config, "multiplex_profiles", False):
+            from gateway.profile_routing import match_profile_route
+
+            route = match_profile_route(
+                getattr(self.config, "profile_routes", None) or [],
+                platform=source.platform.value, chat_id=source.chat_id,
+                thread_id=source.thread_id, parent_chat_id=source.parent_chat_id,
+                guild_id=source.guild_id, adapter_profile=adapter_profile, user_id=user_id,
+            )
+            if (
+                route is not None and route.chat_id and route.authorized_users
+                and route.profile == (source.profile or adapter_profile or "default")
+                and _allows(set(route.authorized_users), user_id)
+            ):
+                return True
+
         platform_allow_env = _ALLOWED_USERS_ENV.get(source.platform, "")
         platform_allow_all_var = _ALLOW_ALL_ENV.get(source.platform, "")
         if source.platform not in _ALLOWED_USERS_ENV:

@@ -143,6 +143,31 @@ def test_slack_interactive_auth_prefers_wired_profile_check(mux_home, monkeypatc
         assert slack(False)._is_interactive_user_authorized("U_X", channel_id="C1") is False
 
 
+def test_shared_slack_bot_grants_only_sender_on_explicit_routed_channel(mux_home):
+    from gateway.profile_routing import parse_profile_routes
+    from plugins.platforms.slack.adapter import SlackAdapter
+
+    runner = _runner(mux_home)
+    runner.config.profile_routes = parse_profile_routes([
+        {"name": "reviews", "platform": "slack", "chat_id": "C_REVIEW",
+         "profile": "secondary", "authorized_users": ["*"]},
+    ])
+    runner.config.platforms = {Platform.SLACK: PlatformConfig(enabled=True, extra={})}
+    slack = object.__new__(SlackAdapter)
+    slack.config = PlatformConfig(enabled=True, extra={})
+    runner.adapters = {Platform.SLACK: slack}
+    check = runner._make_adapter_auth_check(Platform.SLACK)
+
+    assert check("U_REVIEWER", "group", "C_REVIEW") is True
+    assert check("U_REVIEWER", "group", "C_OTHER") is False
+    assert check("U_REVIEWER", "dm", "D_OTHER") is False
+
+    runner.config.profile_routes[0] = parse_profile_routes([
+        {"name": "reviews", "platform": "slack", "chat_id": "C_REVIEW", "profile": "secondary"},
+    ])[0]
+    assert check("U_REVIEWER", "group", "C_REVIEW") is False
+
+
 def test_authorization_adapter_ignores_per_turn_active_profile(mux_home):
     """#87240 egress half: inside a secondary profile's runtime scope the
     default bot must not be handed to that profile (fail-closed None); the
