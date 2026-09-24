@@ -2,6 +2,7 @@ import logging
 import os
 from io import StringIO
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -757,6 +758,37 @@ def test_labels_attribute_populated_after_init(monkeypatch):
         "hermes-profile": "default",
         "hermes-egress": "off",
     }
+
+
+def test_session_profile_identity_wins_over_home_inference(monkeypatch):
+    """A routed session keeps its profile label when the worker lacks the home override."""
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr("hermes_cli.profiles.get_active_profile_name", lambda: "custom")
+    monkeypatch.setattr("gateway.session_context.get_session_env",
+                        lambda name, default="": "stunt-double" if name == "HERMES_SESSION_PROFILE" else default)
+    _mock_subprocess_run(monkeypatch)
+
+    env = _make_dummy_env(task_id="profile:stunt-double")
+
+    assert env._labels["hermes-profile"] == "stunt-double"
+
+
+def test_symlinked_profile_home_labels_docker_container(tmp_path, monkeypatch):
+    """The Docker label preserves the named profile even after its home symlink resolves elsewhere."""
+    root = tmp_path / ".hermes"
+    (root / "profiles").mkdir(parents=True)
+    target = tmp_path / "external-profile"
+    target.mkdir()
+    (root / "profiles" / "stunt-double").symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "stunt-double"))
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr("gateway.session_context.get_session_env", lambda name, default="": default)
+    _mock_subprocess_run(monkeypatch)
+
+    env = _make_dummy_env(task_id="default")
+
+    assert env._labels["hermes-profile"] == "stunt-double"
 
 
 def test_shared_container_key_replaces_profile_identity(monkeypatch):

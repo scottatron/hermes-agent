@@ -102,8 +102,10 @@ _sandbox_dir_name = sanitize_task_id_for_path
 
 
 def _get_active_profile_name() -> str:
-    """Active Hermes profile name, or ``"default"`` on any error. Resolved at container-create
-    time so a container stays tagged with its creator even if the process switches profiles."""
+    """Use the routed session's profile when present; CLI calls use their active home."""
+    from gateway.session_context import get_session_env
+    if profile := get_session_env("HERMES_SESSION_PROFILE", "").strip():
+        return profile
     try:
         from hermes_cli.profiles import get_active_profile_name
         return get_active_profile_name() or "default"
