@@ -102,7 +102,7 @@ def build_profile_terminal_scope(
     closes. It sits where the process env sits in the standalone bridge — explicit YAML keys
     still win (``apply_terminal_config_to_env``).
     """
-    from hermes_cli.config import TERMINAL_CONFIG_ENV_MAP, _terminal_env_value
+    from hermes_cli.config import TERMINAL_CONFIG_ENV_MAP, _expand_env_vars, _terminal_env_value
     from hermes_cli.config_defaults import DEFAULT_CONFIG
 
     home = Path(hermes_home)
@@ -152,7 +152,9 @@ def build_profile_terminal_scope(
             raise TerminalPolicyUnavailable(f"cannot parse {config_path}: {exc}") from exc
         raw_terminal = raw.get("terminal") if isinstance(raw, dict) else None
         if isinstance(raw_terminal, dict):
-            _apply(raw_terminal)
+            # Route-time config reads bypass load_config(), so expand while the caller's
+            # profile secret scope is active, before values become process-independent policy.
+            _apply(_expand_env_vars(raw_terminal))
     _resolve_scope_cwd_placeholder(scope)
     return scope
 
