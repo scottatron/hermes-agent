@@ -9402,7 +9402,15 @@ async function sanitizeDesktopConnectionConfig(config = readDesktopConnectionCon
 // `org` (optional) is the Hermes Cloud org slug/id the instance was discovered
 // under — persisted so Settings can reopen into the same org; omitted from the
 // block when empty so plain remote connections stay unchanged.
-function buildRemoteBlock(remoteUrl, authMode, token, org?: string, headers?: object, name?: string, remoteProfile?: string) {
+function buildRemoteBlock(
+  remoteUrl,
+  authMode,
+  token,
+  org?: string,
+  headers?: object,
+  name?: string,
+  remoteProfile?: string
+) {
   if (authMode !== 'oauth' && !decryptDesktopSecret(token)) {
     throw new Error('Remote gateway session token is required.')
   }
@@ -16868,12 +16876,7 @@ async function interceptSessionRequestForRemote(request, registryConnectionId = 
     }
 
     if (
-      !hasPinnedRegistrySessionSource(
-        registryConnectionId,
-        request?.profile,
-        registrySources,
-        !globalRemoteActive()
-      )
+      !hasPinnedRegistrySessionSource(registryConnectionId, request?.profile, registrySources, !globalRemoteActive())
     ) {
       // Do not manufacture a partial all-gateways response while the selected
       // registry backend is still dialing or has just gone idle. The caller
@@ -16909,12 +16912,7 @@ async function interceptSessionRequestForRemote(request, registryConnectionId = 
     }
 
     if (
-      !hasPinnedRegistrySessionSource(
-        registryConnectionId,
-        request?.profile,
-        registrySources,
-        !globalRemoteActive()
-      )
+      !hasPinnedRegistrySessionSource(registryConnectionId, request?.profile, registrySources, !globalRemoteActive())
     ) {
       return undefined
     }
