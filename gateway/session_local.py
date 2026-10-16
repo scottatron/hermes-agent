@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+import weakref
 from contextlib import contextmanager
 
 from gateway.config import Platform, PlatformConfig
@@ -50,6 +51,8 @@ class LocalSessionAdapter(BasePlatformAdapter):
         return source.platform, source.chat_id, source.user_id, source.profile, source.chat_type
 
     def register_source(self, source):
+        # Local sessions have no receiving transport to stamp this at ingress.
+        source._transport_adapter_ref = weakref.ref(self)
         self.sources[self._source_key(source)] = source, self._identity(source)
 
     def kept_source(self, source):
