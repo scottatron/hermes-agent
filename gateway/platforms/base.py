@@ -3876,9 +3876,21 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
             # say so once per adapter (#102260).
             if not getattr(self, "_no_message_handler_logged", False):
                 self._no_message_handler_logged = True
-                logger.error("[%s] Dropping inbound message: no gateway message handler is installed on this "
-                             "adapter. The adapter is connected and can send, but every inbound message is "
-                             "discarded.", self.name)
+                logger.error(
+                    "[%s] Dropping inbound message: no gateway message handler "
+                    "is installed on this adapter. The adapter is connected and "
+                    "can send, but every inbound message is discarded. "
+                    "profile=%s chat_id=%s thread_id=%s session_key=%s session_id=%s internal=%s",
+                    self.name,
+                    getattr(event.source, "profile", None),
+                    getattr(event.source, "chat_id", None),
+                    getattr(event.source, "thread_id", None),
+                    (event.metadata or {}).get("gateway_session_key"),
+                    (event.metadata or {}).get("gateway_session_id"),
+                    event.internal,
+                    stack_info=True,
+                )
+
             return
 
         if event.allow_gateway_control:
