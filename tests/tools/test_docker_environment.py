@@ -864,6 +864,27 @@ def test_shared_container_key_replaces_profile_identity(monkeypatch, tmp_path):
     assert a._labels == b._labels
 
 
+def test_symlinked_profile_home_labels_docker_container(monkeypatch, tmp_path):
+    """The real Docker label retains a named profile when its home symlink targets elsewhere."""
+    from pathlib import Path
+
+    root = tmp_path / ".hermes"
+    profiles = root / "profiles"
+    profiles.mkdir(parents=True)
+    target = tmp_path / "external-profile"
+    target.mkdir()
+    alias = profiles / "stunt-double"
+    alias.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(alias))
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    _mock_subprocess_run(monkeypatch)
+
+    env = _make_dummy_env(task_id="default")
+
+    assert env._labels["hermes-profile"] == "stunt-double"
+
+
 def test_distinct_shared_keys_never_collide(monkeypatch):
     """Label sanitization is lossy — different raw keys MUST NOT resolve to
     one container identity, or two 'isolated' teams silently attach to the

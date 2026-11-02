@@ -106,3 +106,52 @@ def test_set_session_context_uses_launch_profile_without_override(monkeypatch):
     server._set_session_context("skey-default")
 
     assert get_session_env("HERMES_SESSION_PROFILE") == "default"
+
+
+def test_symlinked_launch_profile_flows_to_terminal_identity(tmp_path, monkeypatch):
+    """TUI and Desktop retain the symlink alias through routed-home switches and Docker identity."""
+    from pathlib import Path
+
+    from hermes_cli.profiles import get_active_profile_name
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    from tools import terminal_tool
+    from tools.environments.docker import _container_identity
+
+    root = tmp_path / ".hermes"
+    (root / "profiles").mkdir(parents=True)
+    target = tmp_path / "external-profile"
+    target.mkdir()
+    linked_home = root / "profiles" / "stunt-double"
+    linked_home.symlink_to(target, target_is_directory=True)
+    other_target = tmp_path / "other-external-profile"
+    other_target.mkdir()
+    other_home = root / "profiles" / "scout"
+    other_home.symlink_to(other_target, target_is_directory=True)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(linked_home))
+    monkeypatch.setattr(terminal_tool, "_session_scope", lambda: terminal_tool._SessionScope("docker", True))
+    monkeypatch.setattr(terminal_tool, "_tenv", lambda name, default="": default)
+    _install_session(monkeypatch, session_key="skey-linked", agent_session_id="session-linked", source="desktop")
+
+    assert get_active_profile_name() == "stunt-double"
+    server._set_session_context("skey-linked")
+    assert get_session_env("HERMES_SESSION_PROFILE") == "stunt-double"
+    assert terminal_tool._resolve_container_task_id("session-linked") == "profile:stunt-double"
+    assert _container_identity() == "stunt-double"
+
+    _install_session(monkeypatch, session_key="skey-other", agent_session_id="session-other",
+                     source="desktop", profile_home=other_home)
+    token = set_hermes_home_override(str(other_home))
+    try:
+        assert get_active_profile_name() == "scout"
+        server._set_session_context("skey-other")
+        assert terminal_tool._resolve_container_task_id("session-other") == "profile:scout"
+        assert _container_identity() == "scout"
+    finally:
+        reset_hermes_home_override(token)
+
+    _install_session(monkeypatch, session_key="skey-linked", agent_session_id="session-linked", source="tui")
+    assert get_active_profile_name() == "stunt-double"
+    server._set_session_context("skey-linked")
+    assert terminal_tool._resolve_container_task_id("session-linked") == "profile:stunt-double"
+    assert _container_identity() == "stunt-double"

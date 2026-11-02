@@ -359,6 +359,50 @@ def test_explicit_session_profile_wins_over_process_home(monkeypatch, tmp_path):
         clear_session_vars(tokens)
 
 
+def test_symlinked_profile_key_and_docker_label_keep_named_identity(monkeypatch, tmp_path):
+    """A named profile symlinked outside the root uses one alias for its key and Docker label."""
+    import hermes_constants
+    from tools.environments.docker import _container_identity
+    from tools.terminal_tool_config import home_profile_name
+
+    root = hermes_constants._get_platform_default_hermes_home()
+    profiles = root / "profiles"
+    profiles.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "external-profile"
+    target.mkdir()
+    alias = profiles / "stunt-double"
+    alias.symlink_to(target, target_is_directory=True)
+    monkeypatch.setenv("HERMES_HOME", str(alias))
+    _persistent_docker(monkeypatch)
+
+    assert home_profile_name() == "stunt-double"
+    assert terminal_tool._resolve_container_task_id(None) == "profile:stunt-double"
+    assert _container_identity() == "stunt-double"
+
+
+def test_routed_container_key_and_docker_label_use_bound_home_identity(monkeypatch, tmp_path):
+    """Routed Docker keys and labels share the routed home, not a session-only label override."""
+    import hermes_constants
+    from gateway.session_context import clear_session_vars, set_session_vars
+    from tools.environments.docker import _container_identity
+
+    _persistent_docker(monkeypatch)
+    root = hermes_constants._get_platform_default_hermes_home()
+    process_home = root / "profiles" / "launch"
+    routed_home = root / "profiles" / "routed"
+    process_home.mkdir(parents=True, exist_ok=True)
+    routed_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(process_home))
+    home_token = hermes_constants.set_hermes_home_override(routed_home)
+    session_tokens = set_session_vars(session_key="agent:main:desktop:1", profile="routed")
+    try:
+        assert terminal_tool._resolve_container_task_id("command") == "profile:routed"
+        assert _container_identity() == "routed"
+    finally:
+        clear_session_vars(session_tokens)
+        hermes_constants.reset_hermes_home_override(home_token)
+
+
 def test_sessionless_named_profile_ignored_when_not_persistent_docker(monkeypatch, tmp_path):
     """The profile key is a persistent-Docker rule. Local stays "default"."""
     from gateway.session_context import reset_session_vars
