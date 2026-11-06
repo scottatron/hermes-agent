@@ -2,12 +2,20 @@
 
 import json
 
+import pytest
 
+
+@pytest.mark.parametrize("managed_config", [
+    None,
+    "terminal:\n  timeout: 42\n",
+    "terminal:\n  docker_env:\n    MANAGED_ENTRY: pinned\n",
+], ids=["no-overlay", "timeout-overlay", "docker-env-overlay"])
 def test_routed_docker_config_expands_home_and_profile_secrets_without_cross_profile_leaks(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, managed_config
 ):
     import gateway.run as gateway
     from agent import secret_scope
+    from hermes_cli import managed_scope
     from tools.terminal_scope import terminal_env
 
     home_a = tmp_path / "profiles" / "a"
@@ -18,6 +26,12 @@ def test_routed_docker_config_expands_home_and_profile_secrets_without_cross_pro
     host_home.mkdir()
     launch_home = tmp_path / ".hermes"
     launch_home.mkdir()
+    managed_home = tmp_path / "managed"
+    managed_home.mkdir()
+    if managed_config is not None:
+        (managed_home / "config.yaml").write_text(managed_config, encoding="utf-8")
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed_home))
+    managed_scope.invalidate_managed_cache()
 
     monkeypatch.setenv("HOME", str(host_home))
     monkeypatch.setenv("HERMES_HOME", str(launch_home))
@@ -74,9 +88,12 @@ def test_routed_docker_config_expands_home_and_profile_secrets_without_cross_pro
                     f"{proxy}/{suffix}:/proxy",
                 ]
                 assert docker_env["AGENT_VAULT_TOKEN"] == token
+                if managed_config and "MANAGED_ENTRY" in managed_config:
+                    assert docker_env["MANAGED_ENTRY"] == "pinned"
                 if profile_home == home_b:
                     assert docker_env["A_ONLY"] == "${AGENT_VAULT_A_ONLY}"
                 else:
                     assert "A_ONLY" not in docker_env
     finally:
         secret_scope.set_multiplex_active(was_multiplex_active)
+        managed_scope.invalidate_managed_cache()

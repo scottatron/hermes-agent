@@ -183,7 +183,8 @@ def build_profile_terminal_scope(
         if isinstance(raw_terminal, dict):
             # Route-time config reads bypass load_config(), so expand while the caller's
             # profile secret scope is active, before values become process-independent policy.
-            _apply_terminal_mapping(scope, _expand_env_vars(raw_terminal))
+            raw_terminal = _expand_env_vars(raw_terminal)
+            _apply_terminal_mapping(scope, raw_terminal)
             image_pinned = image_pinned or "docker_image" in raw_terminal
     managed_terminal = managed_scope.apply_managed_overlay({}).get("terminal")
     if isinstance(managed_terminal, dict):
