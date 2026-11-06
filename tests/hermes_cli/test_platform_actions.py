@@ -180,10 +180,10 @@ class TestStructuredErrors:
     def test_unsupported_platform_action(self):
         actions = PlatformActions("p")
         adapter = MagicMock()
-        adapter.platform = Platform.SLACK
+        adapter.platform = Platform.MATRIX
         adapter.is_connected = True
-        with _grant(True), _runner_with({Platform.SLACK: adapter}):
-            result = asyncio.run(actions.add_reaction("slack", "1", "2", "x"))
+        with _grant(True), _runner_with({Platform.MATRIX: adapter}):
+            result = asyncio.run(actions.add_reaction("matrix", "1", "2", "x"))
         assert result["error"] == "unsupported_platform_action"
 
 
@@ -362,7 +362,9 @@ class TestMultiplexProfileRouting:
         finally:
             clear_session_vars(tokens)
         assert own["ok"] is True
-        assert other_message["error"] == other_chat["error"] == other_platform["error"] == "adapter_not_registered"
+        assert other_message["error"] == other_chat["error"] == "adapter_not_registered"
+        # A Telegram turn's source cannot authorize a Slack reaction.
+        assert other_platform["error"] == "invalid_argument"
         primary._set_reaction.assert_awaited_once()
 
     def test_shared_bot_satellite_cannot_rename_foreign_discord_thread(self, tmp_path):
