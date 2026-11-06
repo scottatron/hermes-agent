@@ -11,7 +11,7 @@ from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
-ACTIONS_CONTRACT_VERSION = 1
+ACTIONS_CONTRACT_VERSION = 2  # v1 remains source-compatible; v2 adds source-bound Slack reactions.
 
 CAPABILITY_ID = "gateway.platform_actions"
 
@@ -66,6 +66,29 @@ async def _discord_add_reaction(adapter: Any, chat_id: str, message_id: str, emo
     return _ok(action="add_reaction")
 
 
+async def _slack_add_reaction(adapter: Any, chat_id: str, message_id: str, emoji: str,
+                              source: dict[str, Any]) -> dict[str, Any]:
+    """React through the workspace client selected by the validated source."""
+    workspace = source["scope_id"]
+    clients = getattr(adapter, "_team_clients", None)
+    # Never use _get_client here: its unknown-workspace fallback is the primary team.
+    client = clients.get(workspace) if isinstance(clients, dict) else None
+    if client is None:
+        return _err("adapter_not_registered", "Slack workspace client unavailable")
+    try:
+        await client.reactions_add(channel=chat_id, timestamp=message_id, name=emoji)
+    except Exception as exc:
+        response = getattr(exc, "response", None)
+        try:
+            error = response.get("error") if response is not None else None
+        except Exception:
+            error = None
+        if error == "already_reacted":
+            return _ok(action="add_reaction")
+        return _err("action_failed", "Slack reactions_add failed")
+    return _ok(action="add_reaction")
+
+
 async def _telegram_set_thread_title(adapter, chat_id, thread_id, title):
     await adapter.rename_dm_topic(chat_id, int(thread_id), title)
     return _ok(action="set_thread_title")
@@ -78,7 +101,8 @@ async def _discord_set_thread_title(adapter, chat_id, thread_id, title):
 
 
 _VERBS = {
-    "add_reaction": {"telegram": _telegram_add_reaction, "discord": _discord_add_reaction},
+    "add_reaction": {"telegram": _telegram_add_reaction, "discord": _discord_add_reaction,
+                     "slack": _slack_add_reaction},
     "set_thread_title": {"telegram": _telegram_set_thread_title, "discord": _discord_set_thread_title},
 }
 
@@ -197,12 +221,79 @@ class PlatformActions:
 
     # -- v1 verbs -----------------------------------------------------------
 
-    async def add_reaction(self, platform: str, chat_id: str, message_id: str, emoji: str) -> dict[str, Any]:
+    async def add_reaction(self, platform: str, chat_id: str, message_id: str, emoji: str,
+                           *, source: dict[str, Any] | None = None) -> dict[str, Any]:
         """Add/set an emoji reaction on a platform message."""
+        platform_value = str(platform).strip().lower()
+        if platform_value == "slack":
+            return await self._run_slack_reaction(chat_id, message_id, emoji, source)
         return await self._run(
             "add_reaction", platform, chat_id, message_id, emoji,
             chat_id=chat_id, message_id=message_id, emoji=emoji,
         )
+
+    async def _run_slack_reaction(self, chat_id: str, message_id: str, emoji: str,
+                                  source: dict[str, Any] | None) -> dict[str, Any]:
+        required = {"platform", "chat_id", "scope_id", "user_id", "thread_id"}
+        if not self._capability_granted():
+            result = _err("capability_not_granted", f"plugin {self._plugin_id!r} lacks {CAPABILITY_ID!r}")
+        elif any(not isinstance(v, str) or not v.strip() for v in (chat_id, message_id, emoji)):
+            result = _err("invalid_argument", "chat_id, message_id and emoji must be non-empty strings")
+        elif not isinstance(source, dict) or not required.issubset(source):
+            result = _err("invalid_argument", "Slack reaction requires a complete source snapshot")
+        elif (source.get("platform") != "slack" or source.get("chat_id") != chat_id
+              or not isinstance(source.get("scope_id"), str) or not source["scope_id"].strip()
+              or not isinstance(source.get("user_id"), str) or not source["user_id"].strip()
+              or (source.get("thread_id") is not None and
+                  (not isinstance(source.get("thread_id"), str) or not source["thread_id"].strip()))
+              or (source.get("parent_chat_id") is not None and
+                  (not isinstance(source.get("parent_chat_id"), str)
+                   or not source["parent_chat_id"].strip()
+                   or source["parent_chat_id"] != chat_id))
+              or (source.get("message_id") is not None and source.get("message_id") != message_id)
+              or (source.get("guild_id") is not None and source.get("guild_id") != source.get("scope_id"))):
+            result = _err("invalid_argument", "Slack source does not match reaction target")
+        else:
+            try:
+                from hermes_cli.profiles import get_active_profile_name
+                from gateway.config import Platform
+                from gateway.run import _gateway_runner_ref
+                from gateway.session import SessionSource
+                profile = get_active_profile_name()
+                if not isinstance(profile, str) or not profile.strip():
+                    result = _err("adapter_not_registered", "active profile could not be resolved")
+                    self._audit("add_reaction", "slack", result)
+                    return result
+                supplied = source.get("profile")
+                if supplied is not None and supplied != profile:
+                    result = _err("invalid_argument", "Slack source profile mismatch")
+                else:
+                    values = {key: source.get(key) for key in (
+                        "chat_id", "scope_id", "user_id", "thread_id", "chat_type", "parent_chat_id",
+                    )}
+                    if values["chat_type"] is None:
+                        values["chat_type"] = "channel"
+                    values.update(platform=Platform.SLACK, profile=profile)
+                    restored = SessionSource(**values)
+                    runner = _gateway_runner_ref()
+                    resolver = getattr(runner, "_delivery_adapter_for", None) if runner is not None else None
+                    adapter = resolver(restored) if callable(resolver) else None
+                    if adapter is None:
+                        result = _err("adapter_not_registered", "no Slack delivery adapter for source")
+                    elif getattr(getattr(adapter, "platform", None), "value", None) != "slack":
+                        result = _err("adapter_not_registered", "resolved adapter is not Slack")
+                    elif not _slack_adapter_authorized(runner, adapter, restored, profile, Platform.SLACK):
+                        result = _err("adapter_not_registered", "Slack adapter does not own this source")
+                    elif not bool(getattr(adapter, "is_connected", False)):
+                        result = _err("adapter_disconnected", "Slack adapter is not connected")
+                    else:
+                        result = await _slack_add_reaction(adapter, chat_id, message_id, emoji, source)
+            except Exception:
+                logger.debug("platform_actions: Slack source reaction resolution failed", exc_info=True)
+                result = _err("action_failed", "Slack reaction could not be resolved")
+        self._audit("add_reaction", "slack", result)
+        return result
+
 
     async def set_thread_title(self, platform: str, chat_id: str, thread_id: str, title: str) -> dict[str, Any]:
         """Rename a thread / forum topic."""
@@ -221,3 +312,26 @@ class PlatformActions:
             result.get("ok"),
             "" if result.get("ok") else f" error={result.get('error')}",
         )
+
+
+def _slack_adapter_authorized(runner, adapter, source, profile, platform) -> bool:
+    """Prove adapter ownership or exact destination routing before use of a shared bot."""
+    owns = getattr(runner, "_owning_profile", None)
+    if not callable(owns):
+        return False
+    try:
+        registered, owner = owns(adapter, platform)
+        if not registered:
+            return False
+        if owner == profile:
+            return True
+        primary_profile = getattr(runner, "_primary_profile_name", None) or "default"
+        if owner is not None:
+            return False
+        if profile == primary_profile:
+            return True
+        routed = getattr(runner, "_routed_primary_adapter", None)
+        return callable(routed) and routed(source) is adapter
+    except Exception:
+        logger.debug("platform_actions: Slack adapter ownership check failed", exc_info=True)
+        return False

@@ -180,10 +180,10 @@ class TestStructuredErrors:
     def test_unsupported_platform_action(self):
         actions = PlatformActions("p")
         adapter = MagicMock()
-        adapter.platform = Platform.SLACK
+        adapter.platform = Platform.MATRIX
         adapter.is_connected = True
-        with _grant(True), _runner_with({Platform.SLACK: adapter}):
-            result = asyncio.run(actions.add_reaction("slack", "1", "2", "x"))
+        with _grant(True), _runner_with({Platform.MATRIX: adapter}):
+            result = asyncio.run(actions.add_reaction("matrix", "1", "2", "x"))
         assert result["error"] == "unsupported_platform_action"
 
 
