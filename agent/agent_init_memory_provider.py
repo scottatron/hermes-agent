@@ -148,6 +148,13 @@ def _memory_provider_init_kwargs(agent, platform) -> dict[str, Any]:
             kwargs[_ident] = _val
     if agent.session_cwd:
         kwargs["cwd"] = agent.session_cwd
+    else:
+        # Gateway/Desktop pin the turn cwd via set_session_cwd(), which never lands on
+        # agent.session_cwd; providers still need the logical cwd (never os.getcwd()).
+        with suppress(Exception):
+            from agent.runtime_cwd import scoped_session_cwd
+            if scoped_cwd := scoped_session_cwd():
+                kwargs["cwd"] = scoped_cwd
     # Profile identity for per-profile provider scoping
     with suppress(Exception):
         from hermes_cli.profiles import get_active_profile_name
