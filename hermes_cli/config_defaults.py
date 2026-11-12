@@ -1710,7 +1710,7 @@ DEFAULT_CONFIG = {
         # for one login without changing this key.
         "codex_login_flow": "device_code",
     },
-    "security": {  # Security: URL/private-network guards, redaction and approval presentation.
+    "security": {"output_policy": {"slack": "allow"},  # Security: URL guards, redaction and approval presentation.
         "allow_private_urls": False,  # private IPs for web/vision/media + cloud/CDP browsers; not local/sidecar Chromium
         # CIDR blocks a local TUN proxy answers DNS with (Mihomo/Clash fake-ip, Surge enhanced).
         # Answers inside these blocks are the proxy's sentinels, not internal hosts, so the guard

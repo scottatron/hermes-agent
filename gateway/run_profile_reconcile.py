@@ -270,6 +270,8 @@ class GatewayProfileReconcileMixin:
         transient_failed = set()
         config_parked = set()
         for name in added + changed:
+            from gateway.run_output_policy import register_output_policy_roster
+            register_output_policy_roster([(name, current[name])])
             # Only acknowledge the configuration observed before connecting;
             # a setup save during an awaited handshake needs another scan.
             scan_signature = profile_serve_signature(current[name])

@@ -1794,7 +1794,9 @@ def _profile_runtime_scope(
     tokens = bind_state(scope_for_profile(profile_home), secrets=prepared_secret_scope,
                         hydrate_secrets=hydrate_secrets, terminal_policy=prepared_terminal_scope)
     try:
-        yield
+        from gateway.run_output_policy import profile_output_policy_scope
+        with profile_output_policy_scope(Path(profile_home)):
+            yield
     finally:
         tokens.reset()
 

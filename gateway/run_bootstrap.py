@@ -796,6 +796,13 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
         if config is None:  # the first load read the default root's platforms under its scope
             resolved_config = _reload_config_keeping_multiplex_verdict(resolved_config)
 
+    # Resolve and persist profile output policy before adapters can emit status or recover delivery.
+    from gateway.run_output_policy import register_output_policy_roster
+    from hermes_constants import get_hermes_home
+    policy_homes = list(profile_homes)
+    policy_homes.append(("launch", Path(get_hermes_home())))
+    register_output_policy_roster(policy_homes)
+
     # Multiplex-only: the ONE host gateway decides first. Attach to it, make it serve this profile,
     # replace it (--replace) or refuse — before anything below binds a port or claims a PID file.
     _host_decision = await _host_attach_or_none(replace, force)
