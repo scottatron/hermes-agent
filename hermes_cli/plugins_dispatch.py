@@ -211,6 +211,11 @@ def _hook_uses_callback_timeout(hook_name: str, timeout: float) -> bool:
 _PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS = 30.0
 
 
+def _local_only_turn() -> bool:
+    from agent.local_execution_policy import local_only_execution
+    return local_only_execution()
+
+
 def resolve_plugin_command_result(result: Any) -> Any:
     """Resolve a plugin command result, awaiting async handlers: ``asyncio.run`` when no loop is
     running, else a helper thread with its own loop (30s bound so a hung handler cannot wedge the
@@ -284,7 +289,7 @@ class PluginDispatchMixin:
         """
         from agent.safe_worker_policy import safe_worker_enabled
 
-        if safe_worker_enabled():
+        if safe_worker_enabled() or _local_only_turn():
             return []
         # Gateway platform events define event-local envelopes; a bus-wide version here would turn
         # unrelated adapter payloads into one monolithic compatibility contract.
@@ -494,6 +499,8 @@ class PluginDispatchMixin:
 
     def _deliver_event(self, item: _QueuedPluginEvent) -> None:
         """Deliver one queued event on the host-owned worker thread."""
+        if _local_only_turn():
+            return
         with self._event_lock:
             if item.generation != self._event_generation:
                 return
@@ -528,6 +535,8 @@ class PluginDispatchMixin:
     def _dispatch_event(self, event: str, payload: dict[str, Any]) -> int:
         """Queue *event* without blocking; return the subscriber count scheduled. Pending work is
         bounded per generation so a blocking subscriber costs one worker and later emits drop."""
+        if _local_only_turn():
+            return 0
         depth = getattr(self._emit_depth, "value", 0)
         if depth >= _EVENT_EMIT_DEPTH_CAP:
             logger.warning(
@@ -560,7 +569,7 @@ class PluginDispatchMixin:
         """Return True when at least one callback is registered for a hook."""
         from agent.safe_worker_policy import safe_worker_enabled
 
-        if safe_worker_enabled():
+        if safe_worker_enabled() or _local_only_turn():
             return False
         return bool(self._hooks.get(hook_name))
 
@@ -582,6 +591,8 @@ class PluginDispatchMixin:
         """True while a loaded plugin's ``transform_llm_output`` registration declared ``hold_stream``.
         Read under the discovery lock: a reload empties the ledger before plugins re-register, and a
         turn deciding in that window would stream text the plugin must rewrite first."""
+        if _local_only_turn():
+            return False
         with self._discovery_lock:
             return any(r.hold_stream for owned in self._ownership_ledger.values() for r in owned)
 
@@ -590,6 +601,8 @@ class PluginDispatchMixin:
         the hold decision under the discovery lock; ``()`` when nothing holds. A reload during the turn
         empties ``_hooks`` before plugins re-register, so the held turn keeps the set it started with
         (:meth:`run_held_transforms`)."""
+        if _local_only_turn():
+            return ()
         with self._discovery_lock:
             if not any(r.hold_stream for owned in self._ownership_ledger.values() for r in owned):
                 return ()
@@ -601,7 +614,7 @@ class PluginDispatchMixin:
         so the caller must not deliver the original."""
         from agent.safe_worker_policy import safe_worker_enabled
 
-        if safe_worker_enabled():
+        if safe_worker_enabled() or _local_only_turn():
             return None, False
         kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
         failed: list = []
@@ -621,6 +634,8 @@ class PluginDispatchMixin:
         run inline. Bounded hooks keep ``plugins.hook_callback_timeout`` via ``asyncio.wait_for``
         (the coroutine is cancelled, not abandoned); a timed-out ``pre_tool_call`` fails closed.
         """
+        if _local_only_turn():
+            return []
         from hermes_cli.plugins import _resolve_hook_callback_timeout
         if hook_name != "gateway_platform_event":
             kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
@@ -652,7 +667,7 @@ class PluginDispatchMixin:
         """Return a stable snapshot of callbacks registered for a hook."""
         from agent.safe_worker_policy import safe_worker_enabled
 
-        if safe_worker_enabled():
+        if safe_worker_enabled() or _local_only_turn():
             return ()
         return tuple(self._hooks.get(hook_name, ()))
 
@@ -662,7 +677,7 @@ class PluginDispatchMixin:
         """Render all registered sections deterministically and fail open."""
         from agent.safe_worker_policy import safe_worker_enabled
 
-        if safe_worker_enabled():
+        if safe_worker_enabled() or _local_only_turn():
             return []
         frozen_info = types.MappingProxyType(dict(session_info))
         rendered: list[RenderedPluginSystemPromptSection] = []
@@ -726,7 +741,7 @@ class PluginDispatchMixin:
         """Return True when at least one callback is registered for middleware."""
         from agent.safe_worker_policy import safe_worker_enabled
 
-        if safe_worker_enabled():
+        if safe_worker_enabled() or _local_only_turn():
             return False
         return bool(self._middleware.get(kind))
 
@@ -742,7 +757,7 @@ class PluginDispatchMixin:
         from agent.safe_worker_policy import safe_worker_enabled
         from hermes_cli.middleware import _safe_copy
 
-        if safe_worker_enabled():
+        if safe_worker_enabled() or _local_only_turn():
             return []
         results: list[Any] = []
         for cb in self._middleware.get(kind, []):

@@ -939,6 +939,11 @@ def handle_function_call(
                                   **asdict(ids), middleware_trace=list(trace), **extra)
         return result
 
+    from agent.local_execution_policy import local_only_execution, local_only_tool_refusal
+    if local_only_execution():
+        return _emit(local_only_tool_refusal(function_name), duration_ms=_elapsed_ms(start),
+                     status="blocked", error_type="local_only_policy")
+
     # Tool Search bridge: tool_search / tool_describe are catalog reads handled
     # inline; tool_call is unwrapped so every downstream hook (pre/post, edit
     # approval, guardrails) sees the real tool name, never the bridge.

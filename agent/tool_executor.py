@@ -667,6 +667,11 @@ def _blocked_tool_result(agent, ref: _ToolCallRef, *, block_body: dict[str, Any]
     return result
 
 
+def _local_only_scope_block(ref: _ToolCallRef) -> str | None:
+    from agent.local_execution_policy import local_only_execution, local_only_tool_message
+    return local_only_tool_message(ref.name) if local_only_execution() else None
+
+
 def _pre_tool_block(agent, ref: _ToolCallRef):
     """Run ``pre_tool_call`` plugin hooks; returns ``(block_message, final_args)`` with any
     hook-modified args applied. Hook failures never block."""
@@ -713,7 +718,8 @@ def _dispatch_authorized_once(
     from tools.hosted_tool_policy import hosted_tool_refusal
     block_message, block_error_type = hosted_tool_refusal(ref.name), "hosted_tool_refused"
     if block_message is None:
-        block_message, block_error_type = scope_block, "tool_scope_block"
+        block_message = scope_block if scope_block is not None else _local_only_scope_block(ref)
+        block_error_type = "tool_scope_block"
     if block_message is None:
         block_error_type = "plugin_block"
         resolve = lambda: _pre_tool_block(agent, ref)
