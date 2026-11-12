@@ -193,6 +193,12 @@ class PluginContext(PluginCapabilityCtxMixin, PluginIdleTaskCtxMixin):
         return self._llm
 
     @cached_property
+    def local_sessions(self) -> Any:
+        """Durable, profile-owned restricted skill submissions and receipt queries."""
+        from hermes_cli.plugin_local_sessions import PluginLocalSessions
+        return PluginLocalSessions(self.plugin_id, Path(self._manager.home_path))
+
+    @cached_property
     def subagent_lifecycle(self) -> Any:
         """Plugin-safe subagent lifecycle service: serializable handles and immutable snapshots,
         never a live agent or private registry."""
