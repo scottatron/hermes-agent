@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 MAX_FRAME = 4 * 1024 * 1024
 BOOTSTRAP_FIELDS = {'version', 'home', 'scope', 'policy', 'api_key', 'text', 'route', 'user_id', 'chat_id',
-                    'turn_author', 'safe_mode', 'ignore_user_config'}
+                    'turn_author', 'safe_mode', 'ignore_user_config', 'local_only'}
 # The bounded run_conversation fields a turn receipt keeps (outcome, exit reason, tokens, cost,
 # model): what the in-process projection commits and ``-z --usage-file`` reads.
 RESULT_FIELDS = ('final_response', 'failed', 'interrupted', 'completed', 'partial', 'error', 'turn_exit_reason',
@@ -109,8 +109,11 @@ def encode_frame(frame):
 
 
 def validate_bootstrap(frame):
-    if set(frame) - {'attachments_v1'} != BOOTSTRAP_FIELDS or frame['version'] != 1:
+    fields = set(frame) - {'attachments_v1'}
+    # Frames from before the explicit no-tools marker remain valid as ordinary worker assignments.
+    if fields - BOOTSTRAP_FIELDS or fields - {'local_only'} != BOOTSTRAP_FIELDS - {'local_only'} or frame['version'] != 1:
         raise ValueError('invalid_managed_worker_bootstrap')
+    frame.setdefault('local_only', False)
     scope = frame['scope']
     fields = {'profile_id', 'session_id', 'execution_id', 'generation', 'pid', 'birth', 'secret', 'epoch'}
     if (not isinstance(scope, dict) or set(scope) != fields or scope['pid'] != os.getpid()
@@ -118,8 +121,22 @@ def validate_bootstrap(frame):
             or not isinstance(frame['policy'], dict)
             or any(not isinstance(frame[k], str) for k in ('text', 'route', 'user_id', 'chat_id'))
             or type(frame['safe_mode']) is not bool or type(frame['ignore_user_config']) is not bool
+            or type(frame['local_only']) is not bool
             or (frame['safe_mode'] and not frame['ignore_user_config'])
             or (frame['api_key'] is not None and not isinstance(frame['api_key'], str))):
+        raise ValueError('invalid_managed_worker_bootstrap')
+    policy = frame['policy']
+    try:
+        request = json.loads(policy['request_json'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError('invalid_managed_worker_bootstrap') from exc
+    policy_local_only = policy.get('local_only', False)
+    request_local_only = request.get('local_only', False) if isinstance(request, dict) else None
+    if (type(policy_local_only) is not bool or policy_local_only != frame['local_only']
+            or type(request_local_only) is not bool or request_local_only != frame['local_only']
+            or (frame['local_only'] and (not frame['safe_mode'] or not frame['ignore_user_config']
+                or bool(policy.get('toolsets')) or policy.get('editor_mcp_json') is not None
+                or request.get('accept_hooks') is True or request.get('follow_profile_config') is True))):
         raise ValueError('invalid_managed_worker_bootstrap')
     from agent.turn_author import parse_turn_author
     if frame['turn_author'] is not None and (not isinstance(frame['turn_author'], dict)
@@ -142,7 +159,8 @@ def bind_worker_policy(frame):
         _bind_worker_config(config)
         return
     from agent.safe_worker_policy import _bind_safe_worker_policy
-    _bind_safe_worker_policy(safe_mode=frame['safe_mode'], ignore_user_config=True, config=config)
+    _bind_safe_worker_policy(safe_mode=frame['safe_mode'], ignore_user_config=True, config=config,
+                             local_only=frame.get('local_only', False))
 
 
 class WorkerChannel:

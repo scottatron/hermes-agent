@@ -8957,6 +8957,11 @@
             "title": "Ignore User Config",
             "type": "boolean"
           },
+          "local_only": {
+            "default": false,
+            "title": "Local Only",
+            "type": "boolean"
+          },
           "skills": {
             "anyOf": [
               {

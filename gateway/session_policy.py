@@ -17,7 +17,7 @@ CREATE_FIELDS = frozenset({'request_id', 'source', 'cwd', 'model', 'toolsets',
                            'yolo', 'safe_mode', 'ignore_user_config',
                            'skills', 'checkpoints', 'accept_hooks', 'pass_session_id', 'follow_profile_config',
                            'service_tier', 'cwd_explicit', 'run_budget', 'verbose', 'row_cwd', 'client_env',
-                           'client'})
+                           'client', 'local_only'})
 # Sections a ``follow_profile_config`` session re-reads from the owning profile's CURRENT config each
 # turn (main's Bot Chat row), credentials included: a frozen key never crosses a profile route change.
 FOLLOW_MODEL_SECTIONS = ('model', 'providers', 'custom_providers', 'fallback_providers', 'fallback_model', 'model_aliases')
@@ -168,6 +168,8 @@ class LocalSessionPolicy:
     # An ACP session's edit approval (``session.mutate edit_policy``; main's ACP modes): ``ask`` (Default),
     # ``workspace_session`` (Accept Edits) or ``session`` (Don't Ask). Sensitive paths always ask.
     edit_approval_policy: str = 'ask'
+    # Host-owned skill sessions carry this persisted boundary through retries and restores.
+    local_only: bool = False
 
     def client_env(self):
         return None if self.client_env_json is None else json.loads(self.client_env_json)
@@ -449,6 +451,14 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True,
         _refuse(bad_bypass, 'must be a boolean')
     safe_mode = params.get('safe_mode', False)
     ignore_user_config = safe_mode or params.get('ignore_user_config', False)
+    local_only = params.get('local_only', False)
+    if type(local_only) is not bool:
+        _refuse('local_only', 'must be a boolean')
+    if local_only:
+        if params.get('editor') or params.get('accept_hooks') is True or params.get('follow_profile_config') is True:
+            _refuse('local_only', 'cannot be combined with editor MCP, accepted hooks, or profile following')
+        safe_mode = True
+        ignore_user_config = True
     if 'api_key' in params and (not isinstance(params['api_key'], str) or not params['api_key'].strip()):
         _refuse('api_key', 'must be a non-empty string')
     model = params.get('model')
@@ -482,7 +492,8 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True,
     # pick wins anyway; skipping it here also spares the probe.
     named = workspace_posture and source != 'tool' and 'cwd' in params and 'toolsets' not in params
     coding_posture = named and _in_coding_workspace(config, source, cwd)
-    enabled = _resolve_toolsets(params, config, source, safe_mode, coding_posture, bypass=ignore_user_config)
+    enabled = (() if local_only else
+               _resolve_toolsets(params, config, source, safe_mode, coding_posture, bypass=ignore_user_config))
     terminal = build_profile_terminal_scope(get_hermes_home()) if profile_terminal else default_terminal_scope()
     # The client's launch folder is a path on THIS host: a remote or container backend keeps its own
     # configured cwd unless the user picked this folder for the session.
@@ -509,7 +520,7 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True,
                               safe_mode=safe_mode, ignore_user_config=ignore_user_config,
                               coding_posture=coding_posture, client_env_json=client_env,
                               client_env_remote=client_env is not None and not client_local,
-                              client_env_rules_json=rules)
+                              client_env_rules_json=rules, local_only=local_only)
 
 
 def terminal_uses_host_cwd(terminal):
@@ -1154,6 +1165,8 @@ def restore_policy(data):
                                                           'edit approval policy')
         if policy.safe_mode and not policy.ignore_user_config:
             raise _policy_refused('safe_mode', 'safe mode requires ignore_user_config')
+        if not _valid_local_only_policy(policy):
+            raise _policy_refused('local_only', 'the stored local-only marker and frozen policy disagree')
         from dataclasses import replace
         for name in ('config_json', 'request_json', 'terminal_json'):
             try:
@@ -1176,6 +1189,23 @@ def restore_policy(data):
         raise
     except (KeyError, TypeError, ValueError) as exc:
         raise AuthorityRefusal('storage_unavailable') from exc
+
+
+def _valid_local_only_policy(policy):
+    """Keep a stored marker, its immutable request, and the frozen deny posture in agreement."""
+    if type(policy.local_only) is not bool:
+        return False
+    try:
+        request = json.loads(policy.request_json)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(request, dict):
+        return False
+    if not policy.local_only:
+        return request.get('local_only') is not True
+    return (policy.safe_mode and policy.ignore_user_config and not policy.toolsets
+            and policy.editor_mcp_json is None and request.get('local_only') is True
+            and request.get('accept_hooks') is not True and request.get('follow_profile_config') is not True)
 
 
 def _valid_client_env(value, kind: type = str):
@@ -1311,13 +1341,14 @@ def policy_scope(policy, *, authority=None, home=None):
     policy_token = _ACTIVE_POLICY.set(active)
     from gateway.session_local_editor import editor_scope
     try:
+        from agent.local_execution_policy import local_only_scope
         from agent.auxiliary_task_config import session_auxiliary_scope
         from gateway.session_local_mcp import editor_mcp_scope
         # Side tasks follow the profile's config.yaml, as every other side-task reader does; a bypass
         # session never reads the profile: its side tasks use its own saved section (code defaults only).
         aux_scope = (session_auxiliary_scope(policy.config(authority, secrets=False).get('auxiliary'))
                      if policy.ignore_user_config else contextlib.nullcontext())
-        with (editor_scope(policy), editor_mcp_scope(authority, policy), aux_scope,
+        with (local_only_scope(policy.local_only), editor_scope(policy), editor_mcp_scope(authority, policy), aux_scope,
               policy.client_env_scope()):
             yield
     finally:

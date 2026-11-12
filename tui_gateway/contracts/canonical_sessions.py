@@ -45,6 +45,8 @@ class CanonicalCreateParams(ProfileParams):
     yolo: bool = False
     safe_mode: bool = False
     ignore_user_config: bool = False
+    # Host-admitted skill turns request the persisted no-tools policy; omitted on ordinary sessions.
+    local_only: bool = False
     skills: list[str] | None = None
     checkpoints: bool = False
     accept_hooks: bool = False

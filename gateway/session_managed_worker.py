@@ -92,7 +92,8 @@ def _bootstrap(authority, ref, row, policy, scope, text=None):
             **({'attachments_v1': row['payload']['attachments_v1']} if 'attachments_v1' in row['payload'] else {}),
             'user_id': live.source.user_id, 'chat_id': live.source.chat_id,
             'turn_author': row_turn_author(policy, row),
-            'safe_mode': policy.safe_mode, 'ignore_user_config': policy.ignore_user_config}
+            'safe_mode': policy.safe_mode, 'ignore_user_config': policy.ignore_user_config,
+            'local_only': policy.local_only}
 
 
 def _worker_config(authority, policy):
