@@ -42,6 +42,7 @@ from agent.i18n import t
 from agent.retry_utils import parse_retry_after_seconds
 from agent.secret_scope import get_secret
 from gateway.config import Platform, PlatformConfig
+from gateway.output_policy import current_output_policy, OutputPolicy, slack_output_denied
 from gateway.approval_actor import approval_refusal, clarify_refusal, refusal_text, slash_confirm_refusal
 from gateway.platforms._shared import (
     apply_yaml_bridge as _apply_yaml_bridge, env_is_connected as _env_is_connected,
@@ -82,6 +83,11 @@ except ImportError:  # pragma: no cover - plugin loaded outside package context
     from adapter_socket_lifecycle import SlackSocketLifecycleMixin  # type: ignore
     from adapter_vault_code import SlackVaultCodeMixin  # type: ignore
     from adapter_image_batch import collect_image_uploads  # type: ignore
+
+try:
+    from .adapter_output_policy import install_slack_api_guard, require_slack_output_allowed
+except ImportError:  # pragma: no cover - plugin loaded outside package context
+    from adapter_output_policy import install_slack_api_guard, require_slack_output_allowed  # type: ignore
 
 
 logger = logging.getLogger(__name__)
@@ -819,7 +825,9 @@ def _apply_slack_proxy(client: Any, proxy_url: Optional[str]) -> None:
         client.proxy = proxy_url
 
 
-def _slack_per_request_proxy_middleware(proxy_url: Optional[str]) -> Callable[..., Awaitable[Any]]:
+def _slack_per_request_proxy_middleware(
+    proxy_url: Optional[str], owner_policy: Optional[OutputPolicy] = None
+) -> Callable[..., Awaitable[Any]]:
     """Bolt ``before_authorize`` middleware re-applying *proxy_url* per request: Bolt builds a fresh
     ``AsyncWebClient`` per request and ``slack_sdk`` treats ``proxy=None`` as "unspecified" (reloads
     ``HTTP(S)_PROXY``, bypassing NO_PROXY), so "go direct" only survives if re-set
@@ -827,6 +835,7 @@ def _slack_per_request_proxy_middleware(proxy_url: Optional[str]) -> Callable[..
 
     async def pin_per_request_proxy(client: Any, next_: Callable[[], Awaitable[Any]]) -> Any:
         _apply_slack_proxy(client, proxy_url)
+        install_slack_api_guard(client, owner_policy)
         return await next_()
 
     return pin_per_request_proxy
@@ -1029,6 +1038,8 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.SLACK)
+        active_policy = current_output_policy()
+        self._output_owner_policy = active_policy if isinstance(active_policy, OutputPolicy) else None
         self._app: Optional[Any] = None
         self._handler: Optional[Any] = None
         self._socket_mode_task: Optional[asyncio.Task] = None
@@ -1481,6 +1492,7 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
             chunks[-1] = (
                 chunks[-1].rstrip() + t("platform.slack.slash.reply_truncated", count=str(dropped)))
         try:
+            require_slack_output_allowed("response_url", self._output_owner_policy)
             async with aiohttp.ClientSession(trust_env=gateway_trust_env()) as session:
                 for idx, chunk in enumerate(chunks):
                     # Only the first chunk replaces the ack.
@@ -1723,9 +1735,10 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
             self._register_plugin_action_handlers()
         super().rewire_plugin_handlers()
 
-    @staticmethod
-    def _new_web_client(token: str, proxy_url: Optional[str]) -> Any:
+    def _new_web_client(self, token: str, proxy_url: Optional[str]) -> Any:
+        owner_policy = getattr(self, "_output_owner_policy", None)
         client = AsyncWebClient(token=token, user_agent_prefix=hermes_user_agent("HermesAgent"))
+        install_slack_api_guard(client, owner_policy)
         _apply_slack_proxy(client, proxy_url)
         return client
 
@@ -1791,7 +1804,8 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
             self._team_clients, self._team_bot_user_ids, self._team_bot_names = {}, {}, {}
             self._app = AsyncApp(
                 token=bot_tokens[0], client=self._new_web_client(bot_tokens[0], proxy_url),
-                before_authorize=_slack_per_request_proxy_middleware(proxy_url))
+                before_authorize=_slack_per_request_proxy_middleware(
+                    proxy_url, self._output_owner_policy))
             _apply_slack_proxy(self._app.client, proxy_url)
             for token in bot_tokens:
                 await self._authenticate_workspace(token, proxy_url)
@@ -6179,8 +6193,10 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
 
     async def _handle_hermes_command(self, ack, command: dict) -> None:
         """Bolt listener for every native slash: ack within 3s, then run. A gated channel gets a
-        bare ack, never a "Running /x" promise the gate in _handle_slash_command will break."""
-        if self._slash_channel_gated(command.get("channel_id", "")):
+        bare ack, never a "Running /x" promise the gate in _handle_slash_command will break. Protected
+        or unattributed shared-profile contexts also get an empty ack so Bolt cannot deliver visible text."""
+        if (self._slash_channel_gated(command.get("channel_id", ""))
+                or slack_output_denied(self._output_owner_policy)):
             await ack()
         else:
             slash = (command.get("command") or "").lstrip("/")
@@ -6693,6 +6709,7 @@ def _standalone_proxy_kwargs() -> tuple[dict[str, Any], dict[str, Any]]:
 
 async def _slack_json_post(session, token: str, method: str, payload: dict, req_kw: dict) -> dict:
     """POST ``payload`` to ``https://slack.com/api/<method>`` with a bearer token; JSON body."""
+    require_slack_output_allowed(method)
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     async with session.post(
         f"https://slack.com/api/{method}", headers=headers, json=payload, **req_kw) as resp:
@@ -6792,6 +6809,7 @@ async def _standalone_send_media(
             'error': "slack_sdk not installed. Run: pip install 'slack-sdk' (required for Slack MEDIA delivery via send_message)",
         }
     client = _AsyncWebClient(token=token)
+    install_slack_api_guard(client)
     _apply_slack_proxy(client, proxy := resolve_proxy_url())  # every catch below: the error may echo it
     last_message_id = None
     # The upload API cannot carry unfurl controls; explicit ones need a separate caption post.

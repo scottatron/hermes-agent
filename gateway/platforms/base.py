@@ -3945,10 +3945,8 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
     async def _handle_message_while_active(self, event: MessageEvent, session_key: str) -> None:
         """Route a message that arrived while ``session_key`` is busy: bypass
         commands / clarify replies dispatch inline, everything else is queued."""
-        # The shared runtime's durable FIFO replaces the adapter's busy-message slot.
-        if self._shared_runtime_owns_input(event):
-            from gateway.session_ingress_burst import dispatch_busy_burst
-            await dispatch_busy_burst(self, event, session_key)  # main's photo/text burst merge
+        from gateway.run_output_policy import admit_busy_message
+        if await admit_busy_message(self, event, session_key):
             return
         # Bypass commands run inline (queued, /new would leak as user text and /approve, /deny deadlock on
         # Event.wait); never via _process_message_background, whose cleanup races the running task (#4926).

@@ -224,6 +224,9 @@ class GatewayInboundMixin(
         if event is None:
             return None
         source = event.source
+        from gateway.run_output_policy import protected_slack_observe_only
+        if await protected_slack_observe_only(self, event, source):
+            return None
 
         if not self._is_user_authorized_for_source(source):
             if source.user_id is None:
