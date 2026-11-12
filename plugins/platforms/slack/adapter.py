@@ -66,6 +66,7 @@ try:  # sibling modules; support both package and flat plugin-dir import
     from .adapter_slash_lane import SlashHandoffLanes
     from .adapter_slash_payload import slash_command_text, slash_thread_id
     from .adapter_reactions_context import slack_reactions_marker
+    from .adapter_reaction_events import publish_reaction_event
     from .adapter_socket_lifecycle import SlackSocketLifecycleMixin
     from .adapter_vault_code import SlackVaultCodeMixin
     from .adapter_image_batch import collect_image_uploads
@@ -80,6 +81,7 @@ except ImportError:  # pragma: no cover - plugin loaded outside package context
     from adapter_slash_lane import SlashHandoffLanes  # type: ignore
     from adapter_slash_payload import slash_command_text, slash_thread_id  # type: ignore
     from adapter_reactions_context import slack_reactions_marker  # type: ignore
+    from adapter_reaction_events import publish_reaction_event  # type: ignore
     from adapter_socket_lifecycle import SlackSocketLifecycleMixin  # type: ignore
     from adapter_vault_code import SlackVaultCodeMixin  # type: ignore
     from adapter_image_batch import collect_image_uploads  # type: ignore
@@ -3856,10 +3858,8 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
         "eyes": "👀", "rocket": "🚀", "tada": "🎉", "fire": "🔥", "wave": "👋"}
 
     async def _handle_slack_reaction(self, event: dict, removed: bool = False) -> None:
-        """Forward reactions as a synthetic ``reaction:<added|removed>:<emoji>`` message
-        (Feishu/Photon convention) from the reactor in the reacted-to thread, so the normal auth
-        gate applies. Hooks fire for every non-self reaction; agent routing is opt-in via
-        ``reaction_triggers`` and, without an explicit allowlist, only on the bot's own messages."""
+        """Observe non-self reactions; optionally route configured emoji as agent messages.
+        Legacy hooks remain independent of triggers; synthetic messages pass normal auth."""
         item = event.get("item") or {}
         if item.get("type") != "message":
             return
@@ -3877,8 +3877,8 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
             team_id = next(iter(self._team_clients))
         client = self._team_clients.get(team_id) if team_id else None
         action = "removed" if removed else "added"
-        # Hooks fire before the opt-in gate so consumers see every human
-        # reaction. getattr: tests build adapters via object.__new__.
+        await publish_reaction_event(self, event, removed=removed)
+        # Legacy hooks observe reactions independently of the opt-in agent gate.
         reaction_handler = getattr(self, "_reaction_handler", None)
         if reaction_handler is not None:
             try:
