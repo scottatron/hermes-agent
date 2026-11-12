@@ -56,6 +56,10 @@ Hermes already ships these for plugin authors:
 - **Make LLM calls:** use `ctx.llm`, which comes with host-owned credentials and a fail-closed trust gate. See [Plugin LLM Access](../plugin-llm-access.md).
 :::
 
+For background work that must retain admission identity across reconnects, see
+[Durable local skill submissions](./local-skill-submissions.md). This restricted
+API starts local Markdown-only skill sessions and exposes queryable receipts.
+
 ## Portable Agent Plugins v1 packages
 
 Hermes can also install and load directory packages that target the Agent
