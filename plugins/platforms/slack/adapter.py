@@ -51,6 +51,7 @@ from gateway.platforms._shared import (
 )
 from gateway.platforms.base_log_safety import safe_url_for_log
 from gateway.platforms.helpers import MessageDeduplicator, clarify_text_with_choices, inline_document_text
+from plugins.platforms.slack.adapter_slash_observe import channel_gated, observe_only
 from plugins.platforms.slack.adapter_config_readers import (
     _extra_or_env_channel_set_getter, _extra_or_env_flag_getter)
 from gateway.platforms.base import (
@@ -6186,17 +6187,15 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
         """The message path's channel gates (_prefilter_inbound, _channel_gate_allows) for a slash
         command: ignored channels are never touched, and outside allowed_channels only a 1:1 DM is
         answered. By id alone, so no lookup can drop a control command."""
-        if self._is_ignored_channel(channel_id):
-            return True
-        allowed_channels = self._slack_allowed_channels()
-        return bool(allowed_channels) and not str(channel_id).startswith("D") and channel_id not in allowed_channels
+        return channel_gated(self, channel_id)
 
     async def _handle_hermes_command(self, ack, command: dict) -> None:
         """Bolt listener for every native slash: ack within 3s, then run. A gated channel gets a
         bare ack, never a "Running /x" promise the gate in _handle_slash_command will break. Protected
         or unattributed shared-profile contexts also get an empty ack so Bolt cannot deliver visible text."""
         if (self._slash_channel_gated(command.get("channel_id", ""))
-                or slack_output_denied(self._output_owner_policy)):
+                or slack_output_denied(self._output_owner_policy)
+                or await observe_only(self, command)):
             await ack()
         else:
             slash = (command.get("command") or "").lstrip("/")

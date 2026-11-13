@@ -45,6 +45,7 @@ with a name allows that one name only.
 | `agent.web_search_provider` | whole module | developer-guide / plugins docs |
 | `cli` | whole module | developer-guide / plugins docs |
 | `gateway.config` | whole module | developer-guide / plugins docs |
+| `gateway.output_policy` | `suppress_slack_chat_ack` | developer-guide / plugins docs |
 | `gateway.platform_registry` | whole module | developer-guide / plugins docs |
 | `gateway.platforms._shared` | whole module | developer-guide / plugins docs |
 | `gateway.platforms.base` | whole module | developer-guide / plugins docs |

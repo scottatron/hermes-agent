@@ -3054,3 +3054,20 @@ plugin load succeeds and runs it in the owning profile's scope. It cancels the t
 unload or gateway shutdown; a replacement with the same name waits for the previous task
 to finish. The factory is not called in CLI processes or before the gateway is ready.
 Use a unique name for each task in a plugin and handle cancellation in the coroutine.
+
+
+### Local skill session delivery
+
+`ctx.local_sessions.submit_skill(..., output_policy="local_session")` admits a skill into a
+normal session for the plugin's profile and stores its receipt and result locally. It uses that
+profile's ordinary model, plugins, tools, and hooks. It does not automatically send its result to
+Slack; tools and plugins can still take actions allowed by the profile. The plugin must allow
+gateway injection. `local_only` remains the
+default and uses the restricted no-tools worker. The delivery mode is part of the idempotency key's
+request identity; changing modes with the same key is refused.
+
+
+To offer Slack events to intake plugins without the built-in gateway chat handling them, set
+`gateway.slack_chat: observe_only` in the receiving profile. This is independent of transport
+output policy: it suppresses ordinary built-in chat after the intake hook, including when that hook
+is missing or fails. It does not prevent plugins or tools from sending messages themselves.

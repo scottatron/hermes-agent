@@ -111,3 +111,16 @@ def profile_output_policy(profile_home: Path, config: dict) -> OutputPolicy | No
     value = section["slack"]
     decision: SlackDecision = "allow" if value == "allow" else "deny"
     return OutputPolicy(str(profile_home), decision)
+
+
+async def suppress_slack_chat_ack(adapter, source) -> bool:
+    """Whether a routed Slack slash should receive a bare protocol acknowledgement."""
+    import asyncio
+    runner = getattr(adapter, "gateway_runner", None)
+    if runner is None:
+        return False
+    from gateway.run_output_policy import protected_slack_observe_only
+    try:
+        return await asyncio.wait_for(protected_slack_observe_only(runner, None, source), timeout=0.5)
+    except (TimeoutError, OSError, RuntimeError, ValueError, TypeError):
+        return True  # a slow or unresolved route must not promise an answer
