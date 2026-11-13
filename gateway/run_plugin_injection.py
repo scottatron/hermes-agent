@@ -137,6 +137,12 @@ def _wake_joined_turn(runner, authority, session_key):
 
 
 class GatewayPluginInjectionMixin:
+    def _install_plugin_hosts(self) -> None:
+        """Publish task and message hosts after the gateway is ready."""
+        from hermes_cli.plugin_gateway_tasks import publish_host
+        publish_host(self, asyncio.get_running_loop())
+        self._install_plugin_message_injector()
+
     def _install_plugin_message_injector(self) -> None:
         """Publish this live gateway's plugin message scheduler process-wide. Runs on the gateway
         loop at startup: its context is the one every plugin-triggered turn starts from."""
@@ -150,6 +156,12 @@ class GatewayPluginInjectionMixin:
         from hermes_cli.plugins import clear_published_gateway_message_host
 
         clear_published_gateway_message_host(self)
+
+    async def _stop_plugin_hosts(self) -> None:
+        """Withdraw plugin hosts and drain their supervised tasks."""
+        self._clear_plugin_message_injector()
+        from hermes_cli.plugin_gateway_tasks import clear_host
+        await clear_host(self)
 
     def _schedule_plugin_message_injection(
         self, *, content: str, plugin_id: str, session_key: Optional[str] = None,

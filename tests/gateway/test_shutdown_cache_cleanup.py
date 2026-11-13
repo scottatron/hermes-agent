@@ -74,6 +74,9 @@ class _FakeGateway:
     def _update_runtime_status(self, *_a, **_kw):
         pass
 
+    async def _stop_plugin_hosts(self):
+        self._clear_plugin_message_injector()
+
     def _clear_plugin_message_injector(self):
         pass
 

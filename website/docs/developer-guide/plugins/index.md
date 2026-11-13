@@ -3044,3 +3044,13 @@ def handler(args, **kwargs):
 # Good — model knows exactly when and how
 "description": "Evaluate a mathematical expression. Use for arithmetic, trig, logarithms. Supports: +, -, *, /, **, sqrt, sin, cos, log, pi, e."
 ```
+
+
+### Gateway background tasks
+
+`ctx.register_gateway_task(factory, name="worker")` registers a zero-argument coroutine
+factory for the messaging gateway. Hermes starts it on the gateway owner loop after the
+plugin load succeeds and runs it in the owning profile's scope. It cancels the task on
+unload or gateway shutdown; a replacement with the same name waits for the previous task
+to finish. The factory is not called in CLI processes or before the gateway is ready.
+Use a unique name for each task in a plugin and handle cancellation in the coroutine.
