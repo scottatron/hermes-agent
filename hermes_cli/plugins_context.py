@@ -237,6 +237,23 @@ class PluginContext(PluginCapabilityCtxMixin, PluginIdleTaskCtxMixin):
         _facade().logger.debug("Plugin %s registered on_unload callback", self.manifest.name)
         return handle
 
+    def register_gateway_task(self, factory: Callable, *, name: Optional[str] = None) -> PluginRegistration:
+        """Run a coroutine factory on the gateway owner loop until unload or shutdown.
+
+        Starts only after this plugin loads successfully and a gateway is ready. The factory
+        executes in this plugin's profile scope. A replacement waits for its predecessor.
+        """
+        if not callable(factory):
+            raise TypeError("gateway task factory must be callable")
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            raise ValueError("gateway task name must be a nonempty string")
+        from hermes_cli.plugin_gateway_tasks import GatewayTask
+        task = GatewayTask(self._manager.home_path, self.plugin_id, name or "task", factory)
+        handle = self._track("gateway_task", task.name, task.dispose)
+        handle.publish = task.publish
+        self._staged.append(handle)
+        return handle
+
     def spawn_task(self, coro, *, name: Optional[str] = None) -> asyncio.Task:
         """Spawn a supervised asyncio task; unload/force reload cancels it. Needs a running loop."""
         if not _facade().asyncio.iscoroutine(coro):

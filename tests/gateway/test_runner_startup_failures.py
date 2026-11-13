@@ -423,6 +423,7 @@ async def test_runner_degrades_gracefully_when_all_adapters_missing(monkeypatch,
         "No adapter could be created" in record.message
         for record in caplog.records
     ), "Expected degraded-mode warning when all adapters are missing"
+    await runner.stop()
 
 
 class _NonRetryableFailureAdapter(BasePlatformAdapter):
