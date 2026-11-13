@@ -103,6 +103,20 @@ async def resolved_profile_output_policy(profile_home: Path) -> OutputPolicy | N
         return OutputPolicy(str(profile_home), "deny")
 
 
+def _profile_slack_chat_observe_only(profile_home: Path) -> bool:
+    """Read the owning profile's built-in Slack chat setting, independently of transport policy."""
+    from hermes_cli.config_effective import load_user_config_effective
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(str(profile_home))
+    try:
+        config = load_user_config_effective(profile_home / "config.yaml", fail_closed=True)
+        gateway = config.get("gateway") or {}
+        return isinstance(gateway, dict) and gateway.get("slack_chat") == "observe_only"
+    finally:
+        reset_hermes_home_override(token)
+
+
 async def protected_slack_observe_only(
     runner, event, source=None, *, run_hook: bool = False,
 ) -> bool:
@@ -133,10 +147,15 @@ async def protected_slack_observe_only(
         profile_home = Path(profile_home)
         policy = await resolved_profile_output_policy(profile_home)
         denied = profile_output_denied(policy)
+        if not denied:
+            try:
+                denied = await asyncio.to_thread(_profile_slack_chat_observe_only, profile_home)
+            except (ImportError, OSError, RuntimeError, ValueError, TypeError, SystemExit, YAMLError):
+                denied = True
     if not denied:
         return False
     if run_hook:
-        if profile_home is not None and isinstance(policy, OutputPolicy):
+        if profile_home is not None:
             token = bind_output_policy(policy)
             try:
                 from gateway.run import _async_profile_runtime_scope

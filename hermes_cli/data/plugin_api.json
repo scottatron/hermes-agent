@@ -37,6 +37,7 @@
         "agent.web_search_provider",
         "cli",
         "gateway.config",
+        "gateway.output_policy:suppress_slack_chat_ack",
         "gateway.platform_registry",
         "gateway.platforms._shared",
         "gateway.platforms.base",

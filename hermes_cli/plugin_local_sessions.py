@@ -1,8 +1,8 @@
 """Profile-scoped durable local skill submissions for trusted plugins.
 
-This adapter admits a Markdown skill as a no-tools local session. It does not
-execute skill scripts or Python handlers. The gateway remains the owner of the
-session and its canonical admission FIFO.
+This adapter admits a Markdown skill into a durable local session. The restricted
+mode uses a no-tools worker; normal local sessions use the profile's usual tools
+and plugins. The gateway owns the session and its canonical admission FIFO.
 """
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ class PluginLocalSessions:
             raise LocalSkillSubmissionError("PROFILE_MISMATCH")
 
     def _request_identity(self, skill_id, skill_version, values, key, output_policy):
-        if output_policy != "local_only":
+        if output_policy not in ("local_only", "local_session"):
             raise LocalSkillSubmissionError("POLICY_UNSUPPORTED")
         if not isinstance(key, str) or not _IDEMPOTENCY_KEY.fullmatch(key):
             raise LocalSkillSubmissionError("INVALID_IDEMPOTENCY_KEY")
@@ -234,10 +234,11 @@ class PluginLocalSessions:
         from gateway.session_authorities import async_owner_scope
         async with async_owner_scope(authority):
             await asyncio.to_thread(self._require_injection_permission)
-            await asyncio.to_thread(self._require_policy)
-            params = {"request_id": request["key"], "source": "tool", "cwd": str(self.profile_home),
-                      "toolsets": [], "safe_mode": True,
-                      "ignore_user_config": True, "local_only": True}
+            if request["output_policy"] == "local_only":
+                await asyncio.to_thread(self._require_policy)
+            params = {"request_id": request["key"], "source": "tool", "cwd": str(self.profile_home)}
+            if request["output_policy"] == "local_only":
+                params.update(toolsets=[], safe_mode=True, ignore_user_config=True, local_only=True)
             params, trusted_policy, trusted_secrets = await asyncio.to_thread(self._launch_policy, params)
             try:
                 row, fresh = await asyncio.to_thread(self._reserve, request)
@@ -378,8 +379,10 @@ class PluginLocalSessions:
 
     @staticmethod
     def _format_input(request):
-        return ("Apply the supplied skill instructions to this JSON input. Return the result as text. "
-                "Do not request tools or perform external actions.\n\n" + request["input_json"])
+        instructions = "Apply the supplied skill instructions to this JSON input. Return the result as text. "
+        if request["output_policy"] == "local_only":
+            instructions += "Do not request tools or perform external actions."
+        return instructions + "\n\n" + request["input_json"]
 
     def _load_row(self, key):
         db = self._connect()

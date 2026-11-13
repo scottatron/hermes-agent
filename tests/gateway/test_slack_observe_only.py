@@ -51,8 +51,11 @@ def _runner(home):
     [{"unknown": "malformed"}],
     RuntimeError("plugin failed"),
 ])
-async def test_protected_ingress_drops_after_missing_failed_or_nonconsuming_hook(monkeypatch, tmp_path, result):
-    monkeypatch.setattr(output_policy, "_protected_profiles", {str(tmp_path)})
+@pytest.mark.parametrize("mode", ["deny", "observe"])
+async def test_protected_ingress_drops_after_missing_failed_or_nonconsuming_hook(monkeypatch, tmp_path, result, mode):
+    monkeypatch.setattr(output_policy, "_protected_profiles", {str(tmp_path)} if mode == "deny" else set())
+    if mode == "observe":
+        (tmp_path / "config.yaml").write_text("gateway:\n  slack_chat: observe_only\n")
     monkeypatch.setattr("gateway.run._is_slack_ignored_channel", lambda *_args: False)
     called = []
 
@@ -80,7 +83,8 @@ async def test_protected_ingress_drops_after_missing_failed_or_nonconsuming_hook
 
 
 @pytest.mark.asyncio
-async def test_protected_busy_slack_input_runs_intake_then_never_queues_or_dispatches(monkeypatch, tmp_path):
+@pytest.mark.parametrize("mode", ["deny", "observe"])
+async def test_protected_busy_slack_input_runs_intake_then_never_queues_or_dispatches(monkeypatch, tmp_path, mode):
     from gateway.run import _async_profile_runtime_scope
     from plugins.platforms.slack.adapter import SlackAdapter
 
@@ -89,7 +93,9 @@ async def test_protected_busy_slack_input_runs_intake_then_never_queues_or_dispa
         yield
 
     monkeypatch.setattr("gateway.run._async_profile_runtime_scope", no_scope)
-    monkeypatch.setattr(output_policy, "_protected_profiles", {str(tmp_path)})
+    monkeypatch.setattr(output_policy, "_protected_profiles", {str(tmp_path)} if mode == "deny" else set())
+    if mode == "observe":
+        (tmp_path / "config.yaml").write_text("gateway:\n  slack_chat: observe_only\n")
     runner = _runner(tmp_path)
     runner._hm_pre_gateway_dispatch_hook = AsyncMock(return_value=None)
     adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-test"))
@@ -113,6 +119,9 @@ async def test_protected_busy_slack_input_runs_intake_then_never_queues_or_dispa
 async def test_unprotected_shared_busy_input_keeps_fifo_dispatch(monkeypatch, tmp_path):
     from plugins.platforms.slack.adapter import SlackAdapter
 
+    observing_home = tmp_path / "observing"
+    observing_home.mkdir()
+    (observing_home / "config.yaml").write_text("gateway:\n  slack_chat: observe_only\n")
     dispatched = AsyncMock()
     monkeypatch.setattr("gateway.session_ingress_burst.dispatch_busy_burst", dispatched)
     monkeypatch.setattr(output_policy, "_protected_profiles", set())
@@ -128,3 +137,21 @@ async def test_unprotected_shared_busy_input_keeps_fifo_dispatch(monkeypatch, tm
         reset_output_policy(token)
 
     dispatched.assert_awaited_once_with(adapter, event, "session-1")
+
+
+@pytest.mark.asyncio
+async def test_busy_hook_enters_profile_scope_when_output_policy_is_none(monkeypatch, tmp_path):
+    from gateway.run_output_policy import protected_slack_observe_only
+
+    entered = []
+    @asynccontextmanager
+    async def scope(home):
+        entered.append(home)
+        yield
+    monkeypatch.setattr("gateway.run._async_profile_runtime_scope", scope)
+    monkeypatch.setattr("gateway.run_output_policy.resolved_profile_output_policy", AsyncMock(return_value=None))
+    runner = _runner(tmp_path)
+    runner._hm_pre_gateway_dispatch_hook = AsyncMock()
+    assert await protected_slack_observe_only(runner, _slack_event(), run_hook=True)
+    assert entered == [tmp_path]
+    runner._hm_pre_gateway_dispatch_hook.assert_awaited_once()
