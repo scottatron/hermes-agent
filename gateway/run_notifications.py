@@ -535,6 +535,9 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         ``skip_targets`` lets startup avoid duplicate messages when a more specific restart
         notification is queued for the same chat.
         """
+        from gateway.run_output_policy import profile_output_policy_scope
+        from hermes_constants import get_hermes_home
+
         delivered: set[tuple[str, str, Optional[str]]] = set()
         skipped = skip_targets or set()
         message = t("gateway.startup.online")
@@ -559,9 +562,31 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             if chat in notified_chats:
                 delivered.add(target)
                 continue
-            if await self._send_home_channel_message(
-                platform, home, transport, message, "Home-channel startup notification failed for %s:%s: %s",
-            ):
+            failure_fmt = "Home-channel startup notification failed for %s:%s: %s"
+            try:
+                profile_home = (
+                    Path(get_hermes_home())
+                    if profile is None
+                    else (getattr(self, "_served_profile_homes", None) or {}).get(profile)
+                )
+                if profile_home is None:
+                    logger.warning(
+                        "Home-channel startup notification skipped: profile home unavailable for %s",
+                        profile,
+                    )
+                    continue
+                with profile_output_policy_scope(Path(profile_home)):
+                    sent = await self._send_home_channel_message(
+                        platform,
+                        home,
+                        transport,
+                        message,
+                        failure_fmt,
+                    )
+            except Exception as exc:
+                logger.warning(failure_fmt, platform.value, home.chat_id, exc)
+                continue
+            if sent:
                 notified_chats.add(chat)
                 delivered.add(target)
                 logger.info("Sent home-channel startup notification to %s:%s", platform.value, home.chat_id)
