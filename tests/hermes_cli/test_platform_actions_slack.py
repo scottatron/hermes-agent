@@ -177,7 +177,7 @@ async def test_existing_telegram_discord_signatures_remain_compatible(monkeypatc
     monkeypatch.setattr(action, "_capability_granted", lambda: True)
     adapter = types.SimpleNamespace(platform=types.SimpleNamespace(value="telegram"), is_connected=True,
                                     _set_reaction=AsyncMock(return_value=True))
-    monkeypatch.setattr(action, "_resolve_adapter", lambda platform: (adapter, None))
+    monkeypatch.setattr(action, "_resolve_adapter", lambda platform, chat_id="", thread_id="": (adapter, None))
     assert (await action.add_reaction("telegram", "c", "m", "x"))["ok"]
     assert await pa._discord_add_reaction(types.SimpleNamespace(_client=None), "c", "m", "x") == {
         "ok": False, "error": "adapter_disconnected", "detail": "discord client unavailable"}
