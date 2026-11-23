@@ -448,3 +448,43 @@ def register(ctx):
         (state / "go").write_text("go")
         manager.unload()
         manager._plugin_host().shutdown()
+
+
+@pytest.mark.platforms("any")
+def test_hosted_plugin_gateway_task_is_refused_before_any_task_runs(tmp_path, monkeypatch):
+    import asyncio
+    from contextlib import asynccontextmanager
+    import gateway.run
+    from hermes_cli.plugin_gateway_tasks import clear_host, publish_host
+
+    marker = tmp_path / "hosted-task-started"
+    plugin = f'''
+from pathlib import Path
+async def worker():
+    Path({str(marker)!r}).write_text("started")
+def register(ctx):
+    ctx.register_gateway_task(worker, name="worker")
+'''
+    _home_with_plugins(tmp_path, monkeypatch, {"hosttask": plugin})
+
+    @asynccontextmanager
+    async def profile_scope(_home):
+        yield
+
+    monkeypatch.setattr(gateway.run, "_async_profile_runtime_scope", profile_scope)
+    manager = PluginManager()
+
+    async def scenario():
+        owner = object()
+        publish_host(owner, asyncio.get_running_loop())
+        try:
+            manager.discover_and_load()
+            assert "register_gateway_task" in str(manager._plugins["hosttask"].error)
+            await asyncio.sleep(0)
+            assert not marker.exists()
+        finally:
+            manager.unload()
+            await clear_host(owner)
+            manager._plugin_host().shutdown()
+
+    asyncio.run(scenario())
