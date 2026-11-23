@@ -486,5 +486,6 @@ def register(ctx):
             manager.unload()
             await clear_host(owner)
             manager._plugin_host().shutdown()
+            assert not marker.exists()
 
     asyncio.run(scenario())
