@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Mapping
 
 from gateway.session_contract import SessionActor, SessionRef, Submission
-from hermes_state_runtime import RuntimeStoreError, find_session_admission
+from persistence.core.errors import AuthorityRefusal as RuntimeStoreError
 
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _SKILL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
@@ -281,10 +281,10 @@ class PluginLocalSessions:
                 authority = self._active_authority()
                 actor = self._actor(authority)
                 from gateway.session_authorities import async_owner_scope
-                from gateway.session_local_recovery import local_identity
+                from persistence.authority.bindings import local_session_id
                 async with async_owner_scope(authority):
-                    session_id = local_identity(authority.profile_id, actor.subject, key)
-                    exists = await asyncio.to_thread(authority.db.get_session, session_id)
+                    session_id = local_session_id(authority.profile_id, actor.subject, key)
+                    exists = await asyncio.to_thread(authority.persistence.sessions.get, session_id)
                 if exists is not None:
                     return {"status": "UNKNOWN", "idempotency_key": key, "session_id": session_id}
             except (LocalSkillSubmissionError, RuntimeStoreError, sqlite3.Error, OSError):
@@ -312,17 +312,17 @@ class PluginLocalSessions:
             else:
                 session_id = row["session_id"]
             async with async_owner_scope(authority):
-                if not await asyncio.to_thread(authority.db.get_session, session_id):
+                if not await asyncio.to_thread(authority.persistence.sessions.get, session_id):
                     return {"status": "UNKNOWN", "idempotency_key": key}
-                found = await asyncio.to_thread(find_session_admission, authority.db,
+                found = await asyncio.to_thread(authority.persistence.admissions.find,
                                                 principal_id=actor.subject, session_id=session_id,
                                                 request_id=key)
             if found is None:
                 return {"status": "UNKNOWN", "idempotency_key": key, "session_id": session_id}
-            if found["status"] == "unknown":
+            if found.status == "unknown":
                 return {"status": "UNKNOWN", "idempotency_key": key, "session_id": session_id}
-            result = await self._receipt(key, row["request_digest"], session_id, found["admission_id"],
-                                         found["status"], found.get("outcome"))
+            result = await self._receipt(key, row["request_digest"], session_id, found.admission_id,
+                                         found.status, found.outcome)
             if result["status"] == "UNKNOWN":
                 return {"status": "UNKNOWN", "idempotency_key": key, "session_id": session_id}
             result = await asyncio.to_thread(self._save_receipt, key, row["request_digest"], result)
@@ -468,17 +468,11 @@ class PluginLocalSessions:
                 "error": outcome if mapped in {"failed", "cancelled"} else None}
 
     def _admission_result(self, admission_id):
-        from hermes_state_terminal import RESULT_PREFIX, load_result
         authority = self._active_authority()
-        with authority.db._read_ctx() as conn:
-            row = conn.execute("SELECT value FROM state_meta WHERE key=?",
-                               (RESULT_PREFIX + admission_id,)).fetchone()
-        if row is None:
+        settled = authority.persistence.admissions.settled_result(admission_id=admission_id)
+        if settled is None or not isinstance(settled.result, Mapping):
             return None
-        try:
-            stored = load_result(row[0])
-        except (TypeError, ValueError):
-            return None
-        result = stored.get("result") if isinstance(stored, dict) else None
+        stored = settled.result
+        result = stored.get("result")
         final = result.get("final_response") if isinstance(result, dict) else None
-        return {"text": final} if isinstance(final, str) else stored
+        return {"text": final} if isinstance(final, str) else dict(stored)

@@ -36,16 +36,14 @@ async def _service(home, monkeypatch):
     monkeypatch.setattr(run, "_load_gateway_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(run, "_resolve_gateway_model", lambda _config: "fixture-model")
     store = SessionStore(home, GatewayConfig())
-    from hermes_state import SessionDB
-    db = SessionDB(db_path=home / "state.db")
-    store._db = db
-    runner = SimpleNamespace(session_store=store, _session_db=db, adapters={}, _draining=False,
+    runner = SimpleNamespace(session_store=store, _session_db=store._scoped_persistence(), adapters={}, _draining=False,
                              _cached_agent_for=lambda _route: None, _adapter_for_source=lambda _source: None)
-    authority = await initialize_session_authority(runner, profile_id=str(home), instance_id="local-skill-test", db=db)
+    authority = await initialize_session_authority(
+        runner, profile_id=str(home), instance_id="local-skill-test", persistence=store._scoped_persistence())
     authority._schedule = lambda _ref: None
     monkeypatch.setattr(run, "_gateway_runner_ref", lambda: runner)
     from gateway.session_authorities import authority_for_home
-    assert authority_for_home(runner, home) is authority, (authority.db.db_path, home)
+    assert authority_for_home(runner, home) is authority
     return PluginLocalSessions("example-plugin", home), authority
 
 
@@ -71,8 +69,7 @@ async def test_real_local_admission_is_deduplicated_and_replay_survives_skill_ch
     assert first["submission_id"] == replay["submission_id"] == after_change["submission_id"]
     assert queried["status"] == "FOUND"
     assert queried["receipt"]["request_digest"] == first["request_digest"]
-    from hermes_state_runtime import list_session_admissions
-    rows = list_session_admissions(authority.db, session_id=first["session_id"], pending_only=False)
+    rows = authority.persistence.admissions.list(session_id=first["session_id"], pending_only=False)
     assert len(rows) == 1
 
 
@@ -81,11 +78,10 @@ async def test_terminal_receipt_reads_the_canonical_result(tmp_path, monkeypatch
     service, authority = await _service(tmp_path, monkeypatch)
     accepted = await service.submit_skill(skill_id="triage", skill_version=_version(skill), input={"topic": "alpha"},
                                           idempotency_key="job-terminal")
-    from hermes_state_runtime import claim_session_input, settle_session_input
-    claimed = claim_session_input(authority.db, epoch=authority.epoch, session_id=accepted["session_id"])
-    assert claimed["admission_id"] == accepted["submission_id"]
-    settle_session_input(authority.db, epoch=authority.epoch, admission_id=claimed["admission_id"],
-                         generation=claimed["generation"], outcome="completed",
+    claimed = authority.persistence.admissions.claim(epoch=authority.epoch, session_id=accepted["session_id"])
+    assert claimed.admission_id == accepted["submission_id"]
+    authority.persistence.admissions.settle(epoch=authority.epoch, admission_id=claimed.admission_id,
+                         generation=claimed.generation, outcome="completed",
                          result={"result": {"final_response": "classified", "messages": []}, "usage": {}})
 
     receipt = await service.get_submission(idempotency_key="job-terminal")
@@ -97,7 +93,7 @@ async def test_terminal_receipt_reads_the_canonical_result(tmp_path, monkeypatch
     saved = await asyncio.to_thread(service._save_receipt, "job-terminal",
                                      accepted["request_digest"], stale)
     assert saved == receipt["receipt"]
-    authority.db.delete_session(accepted["session_id"])
+    authority.persistence.sessions.delete(accepted["session_id"], media_root=str(tmp_path / "media"))
 
     retained = await service.get_submission(idempotency_key="job-terminal")
 
@@ -144,8 +140,7 @@ async def test_lost_submit_ack_reconciles_same_canonical_admission(tmp_path, mon
     assert first["status"] == "UNKNOWN"
     assert replay["status"] == "accepted"
     assert queried["receipt"]["submission_id"] == replay["submission_id"]
-    from hermes_state_runtime import list_session_admissions
-    rows = list_session_admissions(authority.db, session_id=replay["session_id"], pending_only=False)
+    rows = authority.persistence.admissions.list(session_id=replay["session_id"], pending_only=False)
     assert len(rows) == 1
 
 
@@ -165,11 +160,10 @@ async def test_gateway_injection_opt_out_keeps_receipt_readable_and_blocks_new_a
 
     replay = await service.submit_skill(**request)
     queried = await service.get_submission(idempotency_key=request["idempotency_key"])
-    from hermes_state_runtime import list_session_admissions
-    before = list_session_admissions(authority.db, session_id=accepted["session_id"], pending_only=False)
+    before = authority.persistence.admissions.list(session_id=accepted["session_id"], pending_only=False)
     with pytest.raises(LocalSkillSubmissionError, match="GATEWAY_INJECTION_NOT_ALLOWED"):
         await service.submit_skill(**(request | {"idempotency_key": "after-opt-out"}))
-    after = list_session_admissions(authority.db, session_id=accepted["session_id"], pending_only=False)
+    after = authority.persistence.admissions.list(session_id=accepted["session_id"], pending_only=False)
 
     assert replay["submission_id"] == accepted["submission_id"]
     assert queried["status"] == "FOUND"
@@ -201,7 +195,6 @@ async def test_callback_after_profile_removal_does_not_recreate_home(tmp_path, m
     service, authority = await _service(home, monkeypatch)
     accepted = await service.submit_skill(skill_id="triage", skill_version=_version(skill), input={},
                                           idempotency_key="before-removal")
-    authority.db.close()
     shutil.rmtree(home)
 
     receipt = await service.get_submission(idempotency_key="before-removal")
