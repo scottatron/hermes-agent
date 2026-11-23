@@ -221,8 +221,6 @@ def test_skill_root_symlink_cannot_escape_profile(tmp_path):
 async def test_normal_local_session_uses_profile_policy_and_keeps_local_receipt(tmp_path, monkeypatch, skill):
     from gateway import run
     from gateway.session_policy import restore_policy
-    from hermes_state_local import local_receipt
-    from hermes_state_runtime import claim_session_input, settle_session_input
 
     service, authority = await _service(tmp_path, monkeypatch)
     config = {"model": {"default": "fixture-model"}, "platform_toolsets": {"cli": ["terminal"]},
@@ -232,17 +230,17 @@ async def test_normal_local_session_uses_profile_policy_and_keeps_local_receipt(
                    idempotency_key="normal-session", output_policy="local_session")
     accepted = await service.submit_skill(**request)
     assert accepted["status"] == "accepted"
-    policy = restore_policy(local_receipt(authority.db, accepted["session_id"])["policy"])
+    policy = restore_policy(authority.persistence.bindings.receipt(accepted["session_id"]).policy)
     assert not policy.safe_mode and not policy.ignore_user_config and not policy.local_only
     assert '"toolsets"' not in policy.request_json
     assert "terminal" in policy.toolsets
     assert "Triage" in policy.skills_prompt
     with pytest.raises(LocalSkillSubmissionError, match="IDEMPOTENCY_CONFLICT"):
         await service.submit_skill(**(request | {"output_policy": "local_only"}))
-    claimed = claim_session_input(authority.db, epoch=authority.epoch, session_id=accepted["session_id"])
-    assert "Do not request tools" not in claimed["payload"]["text"]
-    settle_session_input(authority.db, epoch=authority.epoch, admission_id=claimed["admission_id"],
-                         generation=claimed["generation"], outcome="completed",
+    claimed = authority.persistence.admissions.claim(epoch=authority.epoch, session_id=accepted["session_id"])
+    assert "Do not request tools" not in claimed.payload["text"]
+    authority.persistence.admissions.settle(epoch=authority.epoch, admission_id=claimed.admission_id,
+                         generation=claimed.generation, outcome="completed",
                          result={"result": {"final_response": "classified", "messages": []}, "usage": {}})
     receipt = await service.get_submission(idempotency_key="normal-session")
     assert receipt["receipt"]["status"] == "completed"
