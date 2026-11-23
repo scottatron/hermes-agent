@@ -186,6 +186,7 @@ def build_profile_terminal_scope(
     from hermes_cli import managed_scope
     from hermes_cli.config import _deep_merge
     from hermes_cli.config_backend import config_exists
+    from hermes_cli.config import _expand_env_vars
 
     home = Path(hermes_home)
     scope = _code_default_terminal_scope()
@@ -235,6 +236,9 @@ def build_profile_terminal_scope(
             raise TerminalPolicyUnavailable(f"cannot parse {config_path}: {exc}") from exc
         raw_terminal = raw.get("terminal") if isinstance(raw, dict) else None
         if isinstance(raw_terminal, dict):
+            # Route-time config reads bypass load_config(), so expand while the caller's
+            # profile secret scope is active, before values become process-independent policy.
+            raw_terminal = _expand_env_vars(raw_terminal)
             _apply_terminal_mapping(scope, raw_terminal)
             image_pinned = image_pinned or "docker_image" in raw_terminal
     managed_terminal = managed_scope.apply_managed_overlay({}).get("terminal")
