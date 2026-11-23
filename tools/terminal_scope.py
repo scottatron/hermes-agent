@@ -238,7 +238,9 @@ def build_profile_terminal_scope(
             # Match startup interpolation for routed profile terminal settings (#101659).
             from hermes_cli.config import _expand_env_vars
 
-            _apply_terminal_mapping(scope, _expand_env_vars(raw_terminal))
+            # Reuse the expanded values when merging managed overrides below.
+            raw_terminal = _expand_env_vars(raw_terminal)
+            _apply_terminal_mapping(scope, raw_terminal)
             image_pinned = image_pinned or "docker_image" in raw_terminal
     managed_terminal = managed_scope.apply_managed_overlay({}).get("terminal")
     if isinstance(managed_terminal, dict):
