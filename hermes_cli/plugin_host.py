@@ -47,6 +47,10 @@ logger = logging.getLogger("hermes_cli.plugins")
 _HOST_MODULE = "hermes_cli.plugin_host_child"
 _START_TIMEOUT_SECS = 30.0
 _SHUTDOWN_GRACE_SECS = 3.0
+_GATEWAY_TASK_CANCEL_RETRY_SECS = 0.05
+_GATEWAY_TASK_LOAD: contextvars.ContextVar[Optional[tuple[str, int]]] = contextvars.ContextVar(
+    "hosted_gateway_task_load", default=None
+)
 # A host that dies is restarted (its plugins reloaded) at most this many times per window; a plugin
 # that kills the host while loading is not reloaded, so one bad plugin cannot crash-loop the rest.
 _RESTART_BUDGET = 3
@@ -84,6 +88,7 @@ class PluginHost:
         # in, so code left running from an unloaded load is not taken for a reload of the same plugin.
         self._loads: dict[str, int] = {}
         self._load_ids = itertools.count(1)
+        self._gateway_task_ids = itertools.count(1)
         self._handles: dict[int, Any] = {}
         self._handle_ids = itertools.count(1)
         self._base_context = self._build_base_context()
@@ -415,7 +420,11 @@ class PluginHost:
         raise ValueError(f"unknown plugin host request {method!r}")
 
     def _plugin_ctx(self, params: dict[str, Any]) -> Any:
-        ctx = self._contexts.get(str(params.get("plugin")))
+        plugin_key = str(params.get("plugin"))
+        ctx = self._contexts.get(plugin_key)
+        task_load = _GATEWAY_TASK_LOAD.get()
+        if task_load is not None and task_load[0] == plugin_key and task_load[1] != self._loads.get(plugin_key):
+            raise LookupError(f"the gateway task's plugin load for {plugin_key!r} is no longer active")
         if ctx is None:
             raise LookupError(f"plugin {params.get('plugin')!r} is not loaded in this host")
         return ctx
@@ -430,7 +439,10 @@ class PluginHost:
                 or method in HOST_SKIPPED_CTX_METHODS or method in {"on_unload", "spawn_task"}):
             raise PluginHostUnsupported(f"ctx.{method}() cannot be called across the plugin host")
         base = _import_ref(HOST_OBJECT_BASES[method]) if method in HOST_OBJECT_BASES else None
-        resolve = functools.partial(self._resolve_ref, base=base)
+        if method == "register_gateway_task":
+            resolve = functools.partial(self._gateway_task_proxy, str(params["plugin"]))
+        else:
+            resolve = functools.partial(self._resolve_ref, base=base)
         args = decode(params.get("args") or [], resolve)
         kwargs = decode(params.get("kwargs") or {}, resolve)
         result = getattr(ctx, method)(*args, **kwargs)
@@ -489,6 +501,66 @@ class PluginHost:
         return encode(value, refs)
 
     # -- proxies ------------------------------------------------------------------------------------
+    def _gateway_task_proxy(self, plugin_key: str, ref: dict[str, Any]) -> Callable[..., Any]:
+        if "__callable__" not in ref:
+            raise TypeError("gateway task factory must be callable")
+        ref_id = int(ref["__callable__"])
+        load = self._loads[plugin_key]
+        with self._lock:
+            channel, proc = self._channel, self._proc
+
+        async def run() -> None:
+            if channel is None or proc is None or self._loads.get(plugin_key) != load:
+                raise PluginHostUnavailable("the gateway task's plugin load is no longer active")
+            invocation_id = next(self._gateway_task_ids)
+            token = _GATEWAY_TASK_LOAD.set((plugin_key, load))
+            try:
+                invocation = asyncio.create_task(self._invoke_gateway_task(channel, proc, {
+                    "ref": ref_id, "load": load, "invocation_id": invocation_id,
+                }))
+            finally:
+                _GATEWAY_TASK_LOAD.reset(token)
+            try:
+                await asyncio.shield(invocation)
+            except asyncio.CancelledError:
+                # Disposal and gateway shutdown can both cancel this wrapper. Keep its lock
+                # until the original invocation returns or its process has exited.
+                drain = asyncio.create_task(self._cancel_gateway_task(channel, invocation_id, invocation))
+                while not drain.done():
+                    try:
+                        await asyncio.shield(drain)
+                    except asyncio.CancelledError:
+                        continue
+                drain.result()
+                raise
+
+        return run
+
+    async def _invoke_gateway_task(self, channel: Channel, proc: subprocess.Popen, params: dict) -> None:
+        try:
+            await channel.call_async("invoke_gateway_task", params)
+        except PluginHostUnavailable:
+            # A lost pipe doesn't establish that plugin code stopped. Use the exact old
+            # process, even if the profile host has already been replaced.
+            while proc.poll() is None:
+                await asyncio.sleep(_GATEWAY_TASK_CANCEL_RETRY_SECS)
+            raise
+
+    async def _cancel_gateway_task(self, channel: Channel, invocation_id: int,
+                                   invocation: asyncio.Task[None]) -> None:
+        try:
+            while not invocation.done():
+                if await channel.call_async("cancel_gateway_task", {"invocation_id": invocation_id}):
+                    break
+                # The child dispatches requests concurrently. Cancel can beat the invoke
+                # to the child loop, or arrive just after it completes.
+                await asyncio.wait((invocation,), timeout=_GATEWAY_TASK_CANCEL_RETRY_SECS)
+        except PluginHostUnavailable:
+            pass  # The invocation still fences the old process.
+        except Exception:
+            logger.exception("Could not cancel hosted gateway task %s", invocation_id)
+        await invocation
+
     def _resolve_ref(self, ref: dict[str, Any], base: Optional[type] = None) -> Any:
         if "__callable__" in ref:
             return self._callable_proxy(ref)
