@@ -362,7 +362,9 @@ class TestMultiplexProfileRouting:
         finally:
             clear_session_vars(tokens)
         assert own["ok"] is True
-        assert other_message["error"] == other_chat["error"] == other_platform["error"] == "adapter_not_registered"
+        assert other_message["error"] == other_chat["error"] == "adapter_not_registered"
+        # A Telegram turn's source cannot authorize a Slack reaction.
+        assert other_platform["error"] == "invalid_argument"
         primary._set_reaction.assert_awaited_once()
 
     def test_shared_bot_satellite_cannot_rename_foreign_discord_thread(self, tmp_path):
