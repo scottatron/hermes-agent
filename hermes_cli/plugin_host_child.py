@@ -145,6 +145,7 @@ class HostRuntime:
         self.asgi_apps: dict[str, Any] = {}
         self.profiles: dict[str, dict[str, Any]] = {}
         self.instance_modules: dict[str, Any] = {}
+        self._gateway_tasks: dict[int, asyncio.Task] = {}
         self.stopped = threading.Event()
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, name="plugin-host-loop", daemon=True).start()
@@ -367,6 +368,56 @@ class HostRuntime:
         args, kwargs = self._decode_args(params)
         return self._encode_result(self.owners.get(ref, ""), self._run(fn(*args, **kwargs)))
 
+    def op_invoke_gateway_task(self, params: dict[str, Any]) -> None:
+        """Run a registered gateway task factory as a cancellable child-loop Task."""
+        ref = int(params["ref"])
+        invocation_id = int(params["invocation_id"])
+        plugin_key = self.owners.get(ref, "")
+        factory = self.refs.get(ref)
+        if not callable(factory):
+            raise LookupError(f"plugin host callable {ref} was released")
+        load = params.get("load")
+
+        async def run_factory() -> None:
+            if load != self.loads.get(plugin_key):
+                raise LookupError(f"plugin host load for {plugin_key!r} is stale")
+            if invocation_id in self._gateway_tasks:
+                raise ValueError(f"gateway task invocation {invocation_id} already exists")
+            task = asyncio.current_task()
+            assert task is not None
+            self._gateway_tasks[invocation_id] = task
+            token = _EXECUTING_PLUGIN.set((plugin_key, load))
+            try:
+                result = factory()
+                if not inspect.isawaitable(result):
+                    raise TypeError("gateway task factory must return an awaitable")
+                await result
+            except asyncio.CancelledError:
+                # Unload and shutdown are expected cancellation paths; the factory's own
+                # cleanup has run before control reaches here.
+                return
+            finally:
+                self._gateway_tasks.pop(invocation_id, None)
+                _EXECUTING_PLUGIN.reset(token)
+
+        # _run carries this RPC's serving_request into the actual loop Task. The map entry is
+        # removed only after the factory's finally blocks and async context managers finish.
+        self._run(run_factory())
+
+    def op_cancel_gateway_task(self, params: dict[str, Any]) -> bool:
+        """Request cancellation once. The invoke RPC acknowledges completion."""
+        invocation_id = int(params["invocation_id"])
+
+        async def cancel() -> bool:
+            task = self._gateway_tasks.get(invocation_id)
+            if task is None:
+                return False
+            if not task.cancelling():
+                task.cancel()
+            return True
+
+        return bool(self._run(cancel()))
+
     def op_obj_invoke(self, params: dict[str, Any]) -> Any:
         ref = int(params["ref"])
         obj = self.refs.get(ref)
@@ -443,6 +494,8 @@ _HANDLERS: dict[str, Callable[[HostRuntime, dict[str, Any]], Any]] = {
     "hello": HostRuntime.op_hello, "load": HostRuntime.op_load, "load_instance": HostRuntime.op_load_instance,
     "asgi": HostRuntime.op_asgi, "profile_call": HostRuntime.op_profile_call,
     "invoke": HostRuntime.op_invoke,
+    "invoke_gateway_task": HostRuntime.op_invoke_gateway_task,
+    "cancel_gateway_task": HostRuntime.op_cancel_gateway_task,
     "obj_invoke": HostRuntime.op_obj_invoke, "obj_getattr": HostRuntime.op_obj_getattr,
     "obj_setattr": HostRuntime.op_obj_setattr, "unload": HostRuntime.op_unload,
     "release": HostRuntime.op_release, "config_schema": HostRuntime.op_config_schema,

@@ -451,41 +451,164 @@ def register(ctx):
 
 
 @pytest.mark.platforms("any")
-def test_hosted_plugin_gateway_task_is_refused_before_any_task_runs(tmp_path, monkeypatch):
+@pytest.mark.parametrize("replacement", ["reload", "republish"])
+def test_hosted_gateway_task_cancels_and_cleans_up_before_replacement(
+    tmp_path, monkeypatch, replacement
+):
     import asyncio
-    from contextlib import asynccontextmanager
-    import gateway.run
     from hermes_cli.plugin_gateway_tasks import clear_host, publish_host
+    from tests.waiting import async_wait_until
+    from tools.registry import registry
 
-    marker = tmp_path / "hosted-task-started"
+    state = tmp_path / "state"
+    state.mkdir()
+    release_cleanup = state / "release-cleanup"
     plugin = f'''
+import asyncio
+import json
+import os
 from pathlib import Path
+from hermes_constants import get_hermes_home
+from tests.waiting import async_wait_until
+
+STATE = Path({str(state)!r})
+
 async def worker():
-    Path({str(marker)!r}).write_text("started")
+    number = len(list(STATE.glob("started-*"))) + 1
+    if number > 1 and not (STATE / "cleanup-1").exists():
+        (STATE / "overlap").touch()
+    starting = STATE / f"starting-{{number}}"
+    starting.write_text(json.dumps({{"pid": os.getpid(), "home": str(get_hermes_home())}}))
+    starting.replace(STATE / f"started-{{number}}")
+    try:
+        await async_wait_until((STATE / f"allow-effect-{{number}}").exists, timeout=20)
+        (STATE / f"effect-{{number}}").touch()
+    except asyncio.CancelledError:
+        (STATE / f"cancelled-{{number}}").touch()
+        raise
+    finally:
+        (STATE / f"cleanup-entered-{{number}}").touch()
+        await async_wait_until((STATE / "release-cleanup").exists, timeout=20)
+        (STATE / f"cleanup-{{number}}").touch()
+
 def register(ctx):
     ctx.register_gateway_task(worker, name="worker")
+    ctx.register_tool(name="hosttask_registered", toolset="hosttask",
+        schema={{"name": "hosttask_registered", "description": "d",
+                "parameters": {{"type": "object", "properties": {{}}}}}},
+        handler=lambda args, **kw: json.dumps({{"pid": os.getpid()}}))
 '''
-    _home_with_plugins(tmp_path, monkeypatch, {"hosttask": plugin})
-
-    @asynccontextmanager
-    async def profile_scope(_home):
-        yield
-
-    monkeypatch.setattr(gateway.run, "_async_profile_runtime_scope", profile_scope)
+    home = _home_with_plugins(tmp_path, monkeypatch, {"hosttask": plugin})
     manager = PluginManager()
 
     async def scenario():
         owner = object()
+
+        async def marker(name):
+            await async_wait_until(
+                lambda: (state / name).exists(), timeout=10, what=f"{name} marker"
+            )
+
         publish_host(owner, asyncio.get_running_loop())
         try:
             manager.discover_and_load()
-            assert "register_gateway_task" in str(manager._plugins["hosttask"].error)
-            await asyncio.sleep(0)
-            assert not marker.exists()
+            assert manager._plugins["hosttask"].error is None
+            registered = json.loads(registry.dispatch(
+                "hosttask_registered", {}, scope=manager.scope_key
+            ))
+            assert registered["pid"] != os.getpid()
+            await marker("started-1")
+            first = json.loads((state / "started-1").read_text())
+            assert first["pid"] != os.getpid()
+            assert first["home"] == str(home.resolve())
+
+            if replacement == "reload":
+                transition = asyncio.create_task(asyncio.to_thread(manager.discover_and_load, force=True))
+            else:
+                transition = asyncio.create_task(clear_host(owner))
+            try:
+                await marker("cleanup-entered-1")
+                assert (state / "cancelled-1").exists()
+                assert not (state / "started-2").exists()
+                if replacement == "republish":
+                    assert not transition.done()
+                    with pytest.raises(RuntimeError, match="previous gateway tasks are still stopping"):
+                        publish_host(object(), asyncio.get_running_loop())
+                (state / "allow-effect-1").touch()
+            finally:
+                release_cleanup.touch()
+                await transition
+            if replacement == "reload":
+                assert manager._plugins["hosttask"].error is None
+            else:
+                publish_host(owner, asyncio.get_running_loop())
+
+            await marker("started-2")
+            assert (state / "cleanup-1").exists()
+            assert not (state / "overlap").exists()
+            assert not (state / "effect-1").exists()
+            second = json.loads((state / "started-2").read_text())
+            assert second["pid"] != os.getpid()
+            assert second["home"] == str(home.resolve())
         finally:
+            release_cleanup.touch()
             manager.unload()
             await clear_host(owner)
             manager._plugin_host().shutdown()
-            assert not marker.exists()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.platforms("any")
+def test_hosted_gateway_tasks_keep_two_profile_homes_isolated(tmp_path, monkeypatch):
+    import asyncio
+    from hermes_cli.plugin_gateway_tasks import clear_host, publish_host
+    from tests.waiting import async_wait_until
+
+    home_roots = [tmp_path / "profile-one", tmp_path / "profile-two"]
+    states = [tmp_path / "one-started", tmp_path / "two-started"]
+    def load_profile(home_root, state):
+        plugin = f'''
+import asyncio
+import json
+import os
+from pathlib import Path
+from hermes_constants import get_hermes_home
+STATE = Path({str(state)!r})
+async def worker():
+    starting = STATE.with_suffix(".starting")
+    starting.write_text(json.dumps({{"home": str(get_hermes_home()), "pid": os.getpid()}}))
+    starting.replace(STATE)
+    await asyncio.Event().wait()
+def register(ctx):
+    ctx.register_gateway_task(worker, name="worker")
+'''
+        home = _home_with_plugins(home_root, monkeypatch, {"hosttask": plugin})
+        return home, PluginManager(scope_key=str(home))
+
+    async def scenario():
+        owner = object()
+        profiles = []
+        try:
+            for home_root, state in zip(home_roots, states):
+                profile = load_profile(home_root, state)
+                profiles.append(profile)
+                _, manager = profile
+                manager.discover_and_load()
+                assert manager._plugins["hosttask"].error is None
+            assert all(not state.exists() for state in states)
+            publish_host(owner, asyncio.get_running_loop())
+            for marker in states:
+                await async_wait_until(marker.is_file, timeout=10, what=f"{marker.name} task start")
+            observed = [json.loads(marker.read_text()) for marker in states]
+            for (home, manager), identity in zip(profiles, observed):
+                assert identity == {"home": str(home.resolve()), "pid": manager._plugin_host().pid}
+            assert len({identity["pid"] for identity in observed} | {os.getpid()}) == 3
+        finally:
+            for _, manager in profiles:
+                manager.unload()
+            await clear_host(owner)
+            for _, manager in profiles:
+                manager._plugin_host().shutdown()
 
     asyncio.run(scenario())

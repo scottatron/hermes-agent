@@ -17,6 +17,7 @@ the type (``SecretSource.fetch -> FetchResult``, ``home_path: Path``), :func:`re
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextvars
 import dataclasses
@@ -31,6 +32,7 @@ import types
 import typing
 from collections import abc
 from concurrent.futures import Future
+from contextlib import contextmanager
 from pathlib import PurePath
 from typing import Any, BinaryIO, Callable, Dict, Optional
 
@@ -324,22 +326,36 @@ class Channel:
         return self._contexts.get(request_id) if request_id is not None else None
 
     def request(self, method: str, params: dict[str, Any], *, timeout: Optional[float] = None) -> Any:
-        if self._closed_reason is not None:
-            raise PluginHostUnavailable(self._closed_reason)
+        with self._outgoing_request(method, params) as (message, future):
+            self._send(message)
+            return future.result(timeout=timeout)
+
+    async def call_async(self, method: str, params: dict[str, Any]) -> Any:
+        """Keep the request context live without holding an executor thread for the response."""
+        with self._outgoing_request(method, params) as (message, future):
+            await asyncio.to_thread(self._send, message)
+            return self.result_of(await asyncio.wrap_future(future))
+
+    @contextmanager
+    def _outgoing_request(self, method: str, params: dict[str, Any]) -> abc.Iterator[tuple[dict, Future]]:
         request_id = next(self._ids)
         future: Future = Future()
+        # The peer owns completion once a request is in flight. Cancelling an
+        # asyncio waiter must not race with the reader completing this future.
+        future.set_running_or_notify_cancel()
         with self._pending_lock:
+            if self._closed_reason is not None:
+                raise PluginHostUnavailable(self._closed_reason)
             self._pending[request_id] = future
-        self._contexts[request_id] = contextvars.copy_context()
+            self._contexts[request_id] = contextvars.copy_context()
         message = {"id": request_id, "method": method, "params": params,
                    "origin": _SERVING.get()}
         try:
-            self._send(message)
-            return future.result(timeout=timeout)
+            yield message, future
         finally:
             with self._pending_lock:
                 self._pending.pop(request_id, None)
-            self._contexts.pop(request_id, None)
+                self._contexts.pop(request_id, None)
 
     def _send(self, message: dict[str, Any]) -> None:
         data = (json.dumps(message, separators=(",", ":"), allow_nan=True) + "\n").encode("utf-8")
@@ -369,8 +385,8 @@ class Channel:
                                      name=f"{self._name}-rpc").start()
                     continue
                 with self._pending_lock:
-                    future = self._pending.get(message.get("id"))
-                if future is not None and not future.done():
+                    future = self._pending.pop(message.get("id"), None)
+                if future is not None:
                     future.set_result(message)
         except (OSError, ValueError) as exc:
             reason = f"{self._name} channel read failed: {exc}"
@@ -418,9 +434,9 @@ class Channel:
                 return
             self._closed_reason = reason
             pending = list(self._pending.values())
+            self._pending.clear()
         for future in pending:
-            if not future.done():
-                future.set_exception(PluginHostUnavailable(reason))
+            future.set_exception(PluginHostUnavailable(reason))
         if self._on_close is not None:
             try:
                 self._on_close(reason)
