@@ -70,7 +70,7 @@ sequenceDiagram
         Note over A: Drop before dispatch
     else Channel passes slash channel gate
         A-->>S: Ephemeral Running acknowledgement
-        A->>A: Check DM policy and early sender gate; normalize command text
+        A->>A: Check DM policy and early sender gate, then normalize command text
         alt Event not forwarded
             Note over A: Already acknowledged, no agent turn
         else Event forwarded
