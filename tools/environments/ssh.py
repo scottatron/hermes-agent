@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Iterable
 
@@ -46,6 +47,17 @@ def _sync_error(reason: str, subject: str, what: str = "the SSH connection") -> 
 # its temporary ControlMaster listener, inside macOS's 103 usable ``sun_path`` bytes (Linux: 107).
 _CONTROL_DIR_MAX_BYTES = 103 - len("/0123456789abcdef.sock") - 17
 _SHORT_TMP_ROOT = "/tmp"  # no-tmp: ok — AF_UNIX sun_path budget; every dir under it is ownership-checked
+_private_control_socket = ContextVar("ssh_private_control_socket", default=False)
+
+
+@contextlib.contextmanager
+def private_ssh_control_socket():
+    """Keep a short-lived SSH environment's cleanup away from other SSH masters."""
+    token = _private_control_socket.set(True)
+    try:
+        yield
+    finally:
+        _private_control_socket.reset(token)
 
 
 def _is_private_runtime_dir(path: str) -> bool:
@@ -74,6 +86,8 @@ def _open_control_dir() -> tuple[Path, bool]:
         return Path(ensure_owned_private_dir(Path(tempfile.gettempdir()) / "hermes-ssh")), False
     per_user = f"hermes-ssh-{os.getuid()}"  # windows-footgun: ok — POSIX only (_SSH_MULTIPLEX)
     roots = list(dict.fromkeys(r for r in (socket_safe_tmpdir(), _SHORT_TMP_ROOT) if os.path.isdir(r)))
+    if _private_control_socket.get():
+        return Path(tempfile.mkdtemp(prefix="hssh-", dir=min(roots, key=len))), True
     candidates = [Path(root) / per_user for root in roots]
     xdg = os.environ.get("XDG_RUNTIME_DIR", "")
     if os.path.isabs(xdg) and _is_private_runtime_dir(xdg):

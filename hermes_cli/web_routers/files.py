@@ -20,6 +20,8 @@ import subprocess
 import sys
 import tempfile
 import urllib.parse
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, Dict, Optional
@@ -27,6 +29,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
+from agent.terminal_env_registry import BUILTIN_BACKEND_NAMES
 from agent.file_safety import (
     HOME_CREDENTIAL_DIRS, HOME_CREDENTIAL_FILES, deny_key, deny_path_under, get_nt_namespace_error,
     get_write_denied_error, is_write_approval_required, resolved_home_credential_stores,
@@ -35,6 +38,7 @@ from hermes_cli import web_server_file_tickets as file_tickets
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.home_data_layout import CREDENTIAL_STORE_DIRS, HOME_ENV_FILES, SECRET_CACHE_STORES
 from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
+from hermes_cli.ssh_workspace_fs import ProviderWorkspaceFs, SshWorkspaceFsError, ssh_workspace_provider
 from hermes_cli.staged_uploads import (
     ensure_profile_subdir, is_staged_upload, removed_on_failure, resolve_upload_home,
 )
@@ -53,7 +57,20 @@ from hermes_cli.web_models import (
 )
 from utils import atomic_write_bytes, atomic_write_text
 
-router = APIRouter()
+_workspace_cleanup: ContextVar[contextlib.AsyncExitStack | None] = ContextVar("workspace_cleanup", default=None)
+
+
+async def _workspace_request_scope():
+    # Downloads consume the adapter after the handler returns.
+    async with contextlib.AsyncExitStack() as stack:
+        token = _workspace_cleanup.set(stack)
+        try:
+            yield
+        finally:
+            _workspace_cleanup.reset(token)
+
+
+router = APIRouter(dependencies=[Depends(_workspace_request_scope)])
 logger = logging.getLogger(__name__)
 
 # Late-bound so a test's monkeypatch on the owning module wins at call time.
@@ -405,21 +422,35 @@ def _fs_git_branch(cwd: str) -> str:
 def _fs_backend(profile: Optional[str] = None):
     """Return the profile's SSH workspace adapter, or None for host-local FS.
 
-    Only an uncached adapter dials the host: the profile's first file request since the server
-    started, or the first after a setting the adapter is built from changes. When that dial fails,
-    or the settings cannot dial at all (no host or user, no ``ssh`` on PATH), the request answers
-    503 ``SSH workspace is unavailable`` and the log names the cause the 503 hides. A cached
-    adapter is not re-dialed here: a host that goes down after it connected fails the read itself,
-    which each route answers on its own.
+    Built-in SSH reuses its cached adapter. An opted-in plugin dials per request so the
+    provider's profile, lifecycle and host-key checks run before workspace access.
+    An unavailable workspace answers 503 rather than reading from the gateway host.
     """
-    from hermes_cli.ssh_workspace_fs import SshWorkspaceFsError, get_ssh_workspace_fs
+    from hermes_cli.ssh_workspace_fs import get_ssh_workspace_fs
     from tools.terminal_tool_config import coerce_ssh_remote_cwd
 
     with _profile_scope(profile):
         terminal = dict(load_config().get("terminal") or {})
         profile_env = load_env()
-        # The adapter dials outside this scope; map the profile's own Hermes dirs while its home is bound.
-        terminal["cwd"] = coerce_ssh_remote_cwd(terminal.get("cwd"), "ssh")
+        backend = str(terminal.get("backend") or "local").strip().lower()
+        if backend == "ssh":
+            terminal["cwd"] = coerce_ssh_remote_cwd(terminal.get("cwd"), "ssh")
+    if backend != "ssh":
+        if backend in BUILTIN_BACKEND_NAMES or not backend:
+            return None
+        try:
+            # Provider discovery and dial need the profile, but not the shared config lock.
+            with _config_profile_scope(profile):
+                provider = ssh_workspace_provider(backend, required=True)
+                if provider is None:
+                    return None
+                adapter = ProviderWorkspaceFs(provider, terminal)
+                if (stack := _workspace_cleanup.get()) is not None:
+                    stack.push_async_callback(asyncio.to_thread, adapter.close)
+                return adapter
+        except SshWorkspaceFsError as exc:
+            logger.warning("Plugin SSH workspace is unavailable: %s", exc.__cause__ or exc)
+            _raise_fs_backend_error(exc)
     for key, env_name in {
         "ssh_host": "TERMINAL_SSH_HOST",
         "ssh_user": "TERMINAL_SSH_USER",
@@ -975,8 +1006,8 @@ async def stream_managed_file(
     session = await _fs_owned_session(session_id, profile)
     authority = getattr(request.state, "file_ticket_authority", None)
     if authority is not None and authority.workspace is not None:
-        target, size = await _ticketed_remote_target(authority, _remote_stream_target)
-        return remote_media_response(request, authority.workspace, target, size, _fs_mime_type(Path(target)))
+        backend, target, size = await _ticketed_remote_target(authority, _remote_stream_target, profile)
+        return remote_media_response(request, backend, target, size, _fs_mime_type(Path(target)))
     if authority is None:
         backend = await asyncio.to_thread(_remote_fs_backend, path, profile)
         if backend is not None:
@@ -1442,6 +1473,11 @@ def _remote_stream_target(backend, path: str) -> tuple[str, int]:
     return target, size
 
 
+@dataclass(frozen=True)
+class _ProviderWorkspaceTicket:
+    identity: tuple
+
+
 async def _remote_file_authority(
     path: str, profile: Optional[str], owner: Path, inspect,
 ) -> Optional[file_tickets.FileAuthority]:
@@ -1451,21 +1487,29 @@ async def _remote_file_authority(
     if backend is None:
         return None
     target, _size = await asyncio.to_thread(inspect, backend, path)
-    authority = file_tickets.FileAuthority(PurePosixPath(target), (owner,), workspace=backend)
+    workspace = _ProviderWorkspaceTicket(backend.ticket_identity) if isinstance(backend, ProviderWorkspaceFs) else backend
+    authority = file_tickets.FileAuthority(PurePosixPath(target), (owner,), workspace=workspace)
     await asyncio.to_thread(authority.check_live)
     return authority
 
 
-async def _ticketed_remote_target(authority: file_tickets.FileAuthority, inspect) -> tuple[str, int]:
+async def _ticketed_remote_target(authority: file_tickets.FileAuthority, inspect, profile: Optional[str]):
     """The SSH file a ticket captured, re-checked by *inspect* while its profile is still live."""
     try:
         await asyncio.to_thread(authority.check_live)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="File ticket profile or resource is unavailable") from exc
-    target, size = await asyncio.to_thread(inspect, authority.workspace, str(authority.target))
+    backend = authority.workspace
+    if isinstance(backend, _ProviderWorkspaceTicket):
+        # Do not retain a connection in the ticket or skip the provider's current running/pin checks.
+        current = await asyncio.to_thread(_fs_backend, profile)
+        if not isinstance(current, ProviderWorkspaceFs) or current.ticket_identity != backend.identity:
+            raise HTTPException(status_code=403, detail="File ticket workspace changed")
+        backend = current
+    target, size = await asyncio.to_thread(inspect, backend, str(authority.target))
     if target != str(authority.target):
         raise HTTPException(status_code=403, detail="File ticket target changed")
-    return target, size
+    return backend, target, size
 
 
 def _remote_download_response(request: Optional[Request], backend, target: str, size: int) -> Response:
@@ -1511,8 +1555,8 @@ async def _ticketed_fs_download(
 ) -> Response:
     """Serve the file a download ticket captured while its profile homes are still live."""
     if authority.workspace is not None:
-        target, size = await _ticketed_remote_target(authority, _remote_download_target)
-        return _remote_download_response(request, authority.workspace, target, size)
+        backend, target, size = await _ticketed_remote_target(authority, _remote_download_target, profile)
+        return _remote_download_response(request, backend, target, size)
 
     from hermes_cli.web_server_file_response import OpenedFileResponse
 

@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 import posixpath
 import shlex
 import subprocess
 import threading
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterator
 
+from agent.terminal_env_registry import BUILTIN_BACKEND_NAMES, snapshot_registration
 from hermes_cli._subprocess_compat import windows_hide_flags
-from tools.environments.ssh import SSHEnvironment
+from hermes_constants import hermes_home_key
+from tools.environments.ssh import SSHEnvironment, private_ssh_control_socket
+
+logger = logging.getLogger(__name__)
 
 
 class SshWorkspaceFsError(RuntimeError):
@@ -288,6 +294,57 @@ exit 1
         target = self.normalize(path)
         result = self._execute(f"git -C {shlex.quote(target)} branch --show-current 2>/dev/null")
         return (result.get("output") or "").strip() if result.get("returncode") == 0 else ""
+
+
+def ssh_workspace_provider(backend: str, *, required: bool = False):
+    """Resolve the opt-in in the bound profile, including before its first session."""
+    if not backend or backend in BUILTIN_BACKEND_NAMES:
+        return None
+    from hermes_cli.plugins import discover_plugins
+
+    try:
+        discover_plugins()
+    except Exception as exc:
+        if required:
+            raise SshWorkspaceFsError("ECONN", "Could not load workspace provider") from exc
+        logger.debug("Could not load workspace provider", exc_info=True)
+        return None
+    provider = snapshot_registration(backend, scope=hermes_home_key())
+    if provider is None and required:
+        raise SshWorkspaceFsError("ECONN", "Configured terminal provider is unavailable")
+    return provider if getattr(type(provider), "supports_ssh_workspace_fs", False) is True else None
+
+
+class ProviderWorkspaceFs(SshWorkspaceFs):
+    """A request-owned adapter built by the plugin, never by core's SSH dialer."""
+
+    def __init__(self, provider, terminal: dict[str, Any]):
+        from tools.terminal_tool_backends import _refuse_plugin_host_provider
+
+        try:
+            _refuse_plugin_host_provider(provider, provider.name)
+            cwd = str(terminal.get("cwd") or "").strip()
+            if cwd in {"", ".", "auto", "cwd"}:
+                cwd = provider.default_cwd or "~"
+            timeout = int(terminal.get("timeout") or 180)
+            with private_ssh_control_socket():
+                env = provider.create_environment(cwd=cwd, timeout=timeout, task_id="workspace-fs")
+            if not isinstance(env, SSHEnvironment):
+                env.cleanup()
+                raise TypeError("SSH workspace providers must return an SSHEnvironment")
+        except Exception as exc:
+            raise SshWorkspaceFsError("ECONN", "Could not connect to the SSH workspace") from exc
+        super().__init__(env)
+        self.ticket_identity = (
+            hermes_home_key(), provider, env.host, env.port, env.user, env.key_path,
+            Path(env.control_socket).name,  # SmolVM includes the pin digest in its socket name.
+        )
+
+    def close(self) -> None:
+        try:
+            self._env.cleanup()
+        except Exception:
+            logger.warning("SSH workspace cleanup failed", exc_info=True)
 
 
 def get_ssh_workspace_fs(profile_key: str, terminal_config: dict[str, Any]) -> SshWorkspaceFs | None:

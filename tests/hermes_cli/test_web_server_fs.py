@@ -15,6 +15,170 @@ from starlette.testclient import TestClient
 
 
 @pytest.fixture
+def plugin_workspace(monkeypatch):
+    from agent import terminal_env_registry
+    from agent.terminal_env_provider import TerminalEnvironmentProvider
+    from hermes_cli import plugins
+    from hermes_constants import get_hermes_home, hermes_home_key
+    from tools.environments.ssh import SSHEnvironment
+
+    home = get_hermes_home()
+    calls = []
+
+    class Guest(SSHEnvironment):
+        def __init__(self, cwd, timeout):
+            self.cwd = cwd
+            self.timeout = timeout
+            self._remote_home = "/guest"
+            self.host, self.user, self.port, self.key_path = "guest", "hermes", 22, "profile-key"
+            self.control_socket = Path("/tmp/test/pinned.sock")
+
+        def execute(self, command, **kwargs):
+            assert not getattr(self, "closed", False)
+            calls.append(("execute", command))
+            if "__HERMES_FS_TARGET__" in command:
+                target = base64.b64encode(b"/guest/work/readme.txt").decode()
+                output = f"__HERMES_FS_TARGET__:{target}\n__HERMES_FS_SIZE__:5\n"
+            else:
+                output = "__HERMES_FS_SIZE__:5\nZ3Vlc3Q=\n"
+            return {"returncode": 0, "output": output}
+
+        def cleanup(self):
+            if not getattr(self, "closed", False):
+                calls.append(("cleanup", self.cwd))
+                self.closed = True
+
+        def _build_ssh_command(self):
+            return ["fixture-ssh"]
+
+    class Provider(TerminalEnvironmentProvider):
+        name = "vm_fixture"
+        display_name = "Test VM"
+        supports_ssh_workspace_fs = True
+        default_cwd = "/guest/work"
+        failure = None
+
+        def is_available(self):
+            return True
+
+        def create_environment(self, *, cwd, timeout, **kwargs):
+            calls.append(("create", get_hermes_home(), cwd, timeout))
+            if self.failure:
+                raise self.failure
+            return Guest(cwd, timeout)
+
+    provider = Provider()
+
+    def discover():
+        terminal_env_registry.register_provider(provider, scope=hermes_home_key())
+
+    monkeypatch.setattr(plugins, "discover_plugins", discover)
+    monkeypatch.setattr(file_routes, "load_config", lambda: {"terminal": {"backend": provider.name}})
+    try:
+        yield provider, home, calls
+    finally:
+        terminal_env_registry.restore_registration(provider.name, provider, None, scope=hermes_home_key(home))
+
+
+def test_opted_in_workspace_reads_through_provider(client, plugin_workspace, tmp_path):
+    _, home, calls = plugin_workspace
+    host_file = tmp_path / "readme.txt"
+    host_file.write_text("host")
+
+    response = client.get("/api/fs/read-text", params={"path": str(host_file)})
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "guest"
+    assert calls[0] == ("create", home, "/guest/work", 180)
+    assert calls[-1] == ("cleanup", "/guest/work")
+
+
+def test_opted_in_workspace_failure_never_reads_host(client, plugin_workspace, tmp_path):
+    provider, _, _ = plugin_workspace
+    provider.failure = RuntimeError("private host pin failure")
+    host_file = tmp_path / "readme.txt"
+    host_file.write_text("host")
+
+    response = client.get("/api/fs/read-text", params={"path": str(host_file)})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "SSH workspace is unavailable"}
+
+
+def test_non_opted_in_workspace_keeps_existing_host_routing(client, plugin_workspace, tmp_path, monkeypatch):
+    provider, _, calls = plugin_workspace
+    monkeypatch.setattr(type(provider), "supports_ssh_workspace_fs", False)
+    host_file = tmp_path / "readme.txt"
+    host_file.write_text("host")
+
+    response = client.get("/api/fs/read-text", params={"path": str(host_file)})
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "host"
+    assert not calls
+
+
+def test_workspace_provider_discovery_is_profile_scoped(client, plugin_workspace, monkeypatch):
+    from agent import terminal_env_registry
+    from hermes_cli import plugins
+    from hermes_constants import get_hermes_home, hermes_home_key
+
+    provider, home, calls = plugin_workspace
+    guest_home = home / "profiles" / "vm"
+    guest_home.mkdir(parents=True)
+    (guest_home / "config.yaml").write_text("terminal: {backend: vm_fixture}")
+
+    def discover():
+        if get_hermes_home() == guest_home:
+            terminal_env_registry.register_provider(provider, scope=hermes_home_key())
+
+    monkeypatch.setattr(plugins, "discover_plugins", discover)
+    try:
+        path = "/guest/work/readme.txt"
+        assert client.get("/api/fs/read-text", params={"path": path}).status_code == 503
+        response = client.get("/api/fs/read-text", params={"path": path, "profile": "vm"})
+        assert response.status_code == 200, response.text
+        assert calls[0] == ("create", guest_home, "/guest/work", 180)
+    finally:
+        terminal_env_registry.restore_registration(provider.name, provider, None, scope=hermes_home_key(guest_home))
+
+
+def test_workspace_ticket_rechecks_provider_and_streams_before_cleanup(client, plugin_workspace, monkeypatch):
+    import io
+
+    provider, _, calls = plugin_workspace
+    monkeypatch.setattr(web_server.app.state, "ui_surface", "webapp", raising=False)
+
+    class Stream:
+        stdout = io.BytesIO(b"guest")
+
+        def wait(self):
+            return 0
+
+        def poll(self):
+            return 0
+
+    def popen(argv, **kwargs):
+        assert argv[0] == "fixture-ssh"
+        assert calls[-1][0] == "execute"
+        calls.append(("stream",))
+        return Stream()
+
+    monkeypatch.setattr(ssh_workspace_fs.subprocess, "Popen", popen)
+    path = "/guest/work/readme.txt"
+    minted = client.post("/api/files/ticket", json={"path": path, "route": "download"})
+    assert minted.status_code == 200, minted.text
+    assert calls[-1][0] == "cleanup"
+    query = {"path": path, "ticket": minted.json()["ticket"]}
+    client.headers.pop(web_server._SESSION_HEADER_NAME)
+    assert client.get("/api/fs/download", params=query).content == b"guest"
+    assert [call[0] for call in calls] == ["create", "execute", "cleanup", "create", "execute", "stream", "cleanup"]
+
+    provider.failure = RuntimeError("VM stopped")
+    assert client.get("/api/fs/download", params=query).status_code == 503
+
+
+@pytest.fixture
 def client(monkeypatch):
     previous_auth_required = getattr(web_server.app.state, "auth_required", None)
     web_server.app.state.auth_required = False

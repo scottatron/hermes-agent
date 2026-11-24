@@ -43,6 +43,9 @@ def _completion_cwd(params: dict | None = None) -> str:
     if not params.get("cwd_explicit") and client_cwd:
         if profile_cwd := _profile_workspace_cwd(profile_home):
             return profile_cwd
+    if provider := _ssh_workspace_plugin(profile_home, _bound_terminal_backend(profile_home)):
+        raw = str(client_cwd or session_cwd or "").strip()
+        return raw if _is_remote_cwd_shape(raw) else _plugin_workspace_default_cwd(profile_home, provider)
     # A session bound to another profile resolves its workspace from THAT profile's config before the launch profile's
     # env var; the dashboard's in-memory gateway does NOT inherit the PTY child's bridged TERMINAL_CWD, so a configured
     # terminal.cwd is read directly.
@@ -105,9 +108,26 @@ def _bound_terminal_backend(profile_home) -> str:
 
 
 def _cwd_is_remote(profile_home) -> bool:
-    """Whether the bound profile's working directory lives on another host (ssh), so a host ``isdir`` check cannot
-    vouch for it. Docker and the other backends mount or copy HOST paths and keep the host checks."""
-    return _bound_terminal_backend(profile_home) == "ssh"
+    """Whether the profile browses a guest workspace, which host ``isdir`` cannot validate."""
+    backend = _bound_terminal_backend(profile_home)
+    return backend == "ssh" or _ssh_workspace_plugin(profile_home, backend) is not None
+
+
+def _ssh_workspace_plugin(profile_home, backend: str):
+    from agent.terminal_env_registry import BUILTIN_BACKEND_NAMES
+    from hermes_cli.ssh_workspace_fs import ssh_workspace_provider
+    from tui_gateway.launch_profile_policy import profile_config_scope
+
+    if backend in BUILTIN_BACKEND_NAMES:
+        return None
+    with profile_config_scope(profile_home or get_hermes_home()):
+        return ssh_workspace_provider(backend)
+
+
+def _plugin_workspace_default_cwd(profile_home, provider) -> str:
+    raw = (str(_profile_terminal_policy(profile_home).get("TERMINAL_CWD") or "").strip()
+           if profile_home else _workdir_terminal_cfg("cwd"))
+    return raw if _is_remote_cwd_shape(raw) else provider.default_cwd or "~"
 
 
 def _declared_remote_profile_cwd(profile_home) -> str | None:
@@ -118,7 +138,12 @@ def _declared_remote_profile_cwd(profile_home) -> str | None:
     """
     policy = _profile_terminal_policy(profile_home)
     raw = str(policy.get("TERMINAL_CWD") or "").strip()
-    return raw if _policy_backend(policy) == "ssh" and _is_remote_cwd_shape(raw) else None
+    backend = _policy_backend(policy)
+    if backend == "ssh":
+        return raw if _is_remote_cwd_shape(raw) else None
+    if provider := _ssh_workspace_plugin(profile_home, backend):
+        return raw if _is_remote_cwd_shape(raw) else provider.default_cwd or "~"
+    return None
 
 
 def _is_remote_cwd_shape(raw: str) -> bool:
@@ -126,7 +151,7 @@ def _is_remote_cwd_shape(raw: str) -> bool:
     stored and git-probed relative to the gateway's own cwd)."""
     from hermes_cli.config import _is_ssh_remote_tilde_cwd
 
-    return _is_ssh_remote_tilde_cwd("ssh", raw) or os.path.isabs(raw)
+    return "\0" not in raw and (_is_ssh_remote_tilde_cwd("ssh", raw) or raw.startswith("/"))
 
 
 def _is_container_path(raw: str) -> bool:
@@ -247,6 +272,9 @@ def _resolve_create_cwd(params: dict, source: str, profile_home) -> tuple[bool, 
     persists nothing and a named profile's configured ``terminal.cwd`` keeps winning.
     """
     raw_cwd = str(params.get("cwd") or "").strip()
+    if _ssh_workspace_plugin(profile_home, _bound_terminal_backend(profile_home)) is not None:
+        explicit = bool(raw_cwd and _is_remote_cwd_shape(raw_cwd) and params.get("cwd_explicit", True))
+        return explicit, _completion_cwd(params), explicit
     remote_cwd = bool(raw_cwd) and _is_remote_cwd_shape(raw_cwd) and _cwd_is_remote(profile_home)
     explicit_cwd = False
     with contextlib.suppress(Exception):
@@ -372,6 +400,9 @@ def _resumable_stored_cwd(cwd, profile_home) -> str:
     re-persists it). Hydration and ``session.resume`` both adopt through here, then treat the result as the
     session's workspace. A folder a sandbox user picked (even under the Hermes root or ``$HOME``) stays."""
     cwd = str(cwd or "")
+    if cwd and _ssh_workspace_plugin(profile_home, _bound_terminal_backend(profile_home)) is not None:
+        # A selected guest path can have the same spelling as a host/profile path.
+        return cwd if _is_remote_cwd_shape(cwd) else ""
     if cwd and _cwd_is_remote(profile_home) and _is_hermes_owned_cwd(cwd, profile_home):
         return ""
     if cwd and not _cwd_is_remote(profile_home) and not _host_cwd_is_terminal_cwd(profile_home) \

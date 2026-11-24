@@ -340,6 +340,18 @@ class TestSSHProbeOnly:
         assert len(control_exit_calls) == 1
 
 
+@pytest.mark.platforms("posix")
+def test_workspace_connection_uses_private_control_directory(_mock_ssh_runtime):
+    terminal = ssh_env.SSHEnvironment(host="example.com", user="alice", sync_files=False)
+    with ssh_env.private_ssh_control_socket():
+        workspace = ssh_env.SSHEnvironment(host="example.com", user="alice", sync_files=False)
+    # A provider can override the socket basename (as SmolVM does for its host pin).
+    # Isolation must hold even with identical basenames.
+    assert workspace.control_socket.name == terminal.control_socket.name
+    assert workspace.control_dir != terminal.control_dir
+    assert workspace._owns_control_dir
+
+
 def _setup_ssh_env(monkeypatch, persistent: bool):
     monkeypatch.setenv("TERMINAL_ENV", "ssh")
     monkeypatch.setenv("TERMINAL_SSH_HOST", _SSH_HOST)

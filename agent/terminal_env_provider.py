@@ -49,6 +49,10 @@ class TerminalEnvironmentProvider(ProviderBase):
       ``computer_use`` and the browser then follow the terminal into this backend, as they do for
       docker/ssh, instead of refusing.
 
+    * ``supports_ssh_workspace_fs`` — opt in to the gateway's SSH workspace filesystem. The
+      in-process provider must return an ``SSHEnvironment`` using its own profile-scoped trust
+      and credentials, without host file sync. The gateway owns the short-lived environment.
+
     * ``serves_hosted_scopes`` — the backend runs a hosted tenant's agent: every tool of a hosted scope
       (terminal, code execution, background processes, file tools) runs in its environment, and a
       hosted scope refuses any backend without it (built-ins included). See below.
@@ -86,6 +90,7 @@ class TerminalEnvironmentProvider(ProviderBase):
     is_container: bool = True
     session_isolated_when_nonpersistent: bool = False
     supports_streams: bool = False
+    supports_ssh_workspace_fs: bool = False
     serves_hosted_scopes: bool = False
 
     @property

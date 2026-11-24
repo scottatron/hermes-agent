@@ -81,6 +81,26 @@ def clean_registry():
     registry._reset_for_tests()
 
 
+def test_ssh_workspace_plugin_accepts_guest_only_cwd(monkeypatch, clean_registry):
+    from hermes_cli import plugins
+    from hermes_constants import hermes_home_key
+
+    class WorkspaceVm(_Sprites):
+        supports_ssh_workspace_fs = True
+        default_cwd = "/guest/work"
+
+    monkeypatch.setattr(plugins, "discover_plugins", lambda: None)
+    clean_registry.register_provider(WorkspaceVm(), scope=hermes_home_key())
+    _backend(monkeypatch, "sprites")
+    cwd = "/guest/work/project"
+
+    assert server._workspace_cwd(None, cwd) == cwd
+    assert server._resolve_create_cwd({"cwd": cwd, "cwd_explicit": True}, "desktop", None) == (True, cwd, True)
+    assert server._completion_cwd() == "/guest/work"
+    with pytest.raises(ValueError, match="remote working directory"):
+        server._workspace_cwd(None, "relative/path")
+
+
 @pytest.mark.parametrize("backend", ["modal", "daytona"])
 def test_sandbox_session_does_not_register_the_launch_dir(launch_dir, monkeypatch, backend):
     _backend(monkeypatch, backend)
